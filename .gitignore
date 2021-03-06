@@ -13,6 +13,7 @@ exp-nouchi/
 !dataset-metadata.json
 
 .DS_Store
+catboost_info
 
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks
