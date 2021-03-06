@@ -72,8 +72,11 @@ class Config:
     long_title_n_components = 15
     desc_en_n_components = 15
     lgb_num_boost_round = 100
+    cat_aggs = ["count"]
     # bert_model = "_stsb_roberta_large"
-    bert_model = ""
+    # bert_model = "_bert_base_multilingual_uncase"
+    bert_model = "_bert_base_multilingual_case"
+    # bert_model = ""
     lgb_params = {
         "num_leaves": 32,
         "min_data_in_leaf": 64,
@@ -130,6 +133,24 @@ def label_encoding(
     raw.train[col] = label_encs[col].transform(raw.train[col])
     raw.test[col] = label_encs[col].transform(raw.test[col])
     return label_encs, raw
+
+
+def cat_encoding(raw: RawData, col: str) -> RawData:
+    exists = False
+    for agg in Config.cat_aggs:
+        if f"{col}_{agg}" in raw.train.columns:
+            exists = True
+    if exists:
+        return raw
+    _agg_df = raw.train.groupby(col)["likes_log"].agg(Config.cat_aggs)
+    _agg_df.columns = [f"{col}_{agg}" for agg in Config.cat_aggs]
+    raw.train = raw.train.merge(_agg_df, on=col, how="left")
+    raw.test = raw.test.merge(_agg_df, on=col, how="left")
+
+    for agg in Config.cat_aggs:
+        raw.train[f"{col}_{agg}"] = raw.train[f"{col}_{agg}"].fillna(0)
+        raw.test[f"{col}_{agg}"] = raw.test[f"{col}_{agg}"].fillna(0)
+    return raw
 
 
 def _fe_sub_title(df: pd.DataFrame) -> pd.DataFrame:
@@ -350,6 +371,7 @@ raw = fe(raw, Config.long_title_n_components, Config.desc_en_n_components)
 
 
 # %%
+models = "lgbm+cat"
 features = (
     [
         "size_h",
@@ -401,10 +423,13 @@ cat_features = [
     ]
 ]
 
+features += [f"{col}_{agg}" for agg in Config.cat_aggs for col in cat_features]
+
 
 label_encs = {col: LabelEncoder() for col in cat_features}
 for col in cat_features:
     label_encs, raw = label_encoding(label_encs, raw, col)
+    raw = cat_encoding(raw, col)
 
 folds = StratifiedKFold(
     n_splits=Config.n_splits, shuffle=True, random_state=Config.seed
@@ -414,36 +439,43 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
     print(f"------------------------ fold {fold} -----------------------")
     _train_df = raw.train.loc[train_idx]
     _valid_df = raw.train.loc[valid_idx]
-    lgb_train_dataset = lgb.Dataset(_train_df[features], _train_df["likes_log"])
-    lgb_valid_dataset = lgb.Dataset(_valid_df[features], _valid_df["likes_log"])
-    lgb_model = lgb.train(
-        Config.lgb_params,
-        lgb_train_dataset,
-        num_boost_round=1000,
-        valid_sets=[lgb_train_dataset, lgb_valid_dataset],
-        verbose_eval=50,
-        early_stopping_rounds=200,
-        categorical_feature=cat_features,
-    )
 
-    y_pred = np.expm1(lgb_model.predict(_valid_df[features]))
+    if models in ["lgbm+cat", "lgbm"]:
+        lgb_train_dataset = lgb.Dataset(_train_df[features], _train_df["likes_log"])
+        lgb_valid_dataset = lgb.Dataset(_valid_df[features], _valid_df["likes_log"])
+        lgb_model = lgb.train(
+            Config.lgb_params,
+            lgb_train_dataset,
+            num_boost_round=1000,
+            valid_sets=[lgb_train_dataset, lgb_valid_dataset],
+            verbose_eval=50,
+            early_stopping_rounds=300,
+            categorical_feature=cat_features,
+        )
+        y_pred_lgb = np.expm1(lgb_model.predict(_valid_df[features]))
 
-    # cat_train_dataset = Pool(
-    #     _train_df[features], _train_df["likes_log"], cat_features=cat_features
-    # )
-    # cat_valid_dataset = Pool(
-    #     _valid_df[features], _valid_df["likes_log"], cat_features=cat_features
-    # )
-    # cat_model = CatBoostRegressor(**Config.cat_params, iterations=2000)
-    # cat_model.fit(
-    #     cat_train_dataset,
-    #     verbose_eval=100,
-    #     eval_set=[cat_train_dataset, cat_valid_dataset],
-    #     early_stopping_rounds=200,
-    # )
-    # y_pred_cat = np.expm1(cat_model.predict(_valid_df[features]))
-    # y_pred_lgb = np.expm1(cat_model.predict(_valid_df[features]))
-    # y_pred = (y_pred_cat + y_pred_lgb) / 2
+    if models in ["lgbm+cat", "cat"]:
+        cat_train_dataset = Pool(
+            _train_df[features], _train_df["likes_log"], cat_features=cat_features
+        )
+        cat_valid_dataset = Pool(
+            _valid_df[features], _valid_df["likes_log"], cat_features=cat_features
+        )
+        cat_model = CatBoostRegressor(**Config.cat_params, iterations=3000)
+        cat_model.fit(
+            cat_train_dataset,
+            verbose_eval=100,
+            eval_set=[cat_train_dataset, cat_valid_dataset],
+            early_stopping_rounds=200,
+        )
+        y_pred_cat = np.expm1(cat_model.predict(_valid_df[features]))
+
+    if models == "lgbm+cat":
+        y_pred = (y_pred_cat + y_pred_lgb) / 2
+    elif models == "lgbm":
+        y_pred = y_pred_lgb
+    elif models == "cat":
+        y_pred = y_pred_cat
 
     y_pred[y_pred < 0] = 0
     y_true = _valid_df["likes"].values
@@ -455,7 +487,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
 
 print("")
 print(f"------------------- average rmsle {np.mean(rmsles)} -----------------------")
-lgb.plot_importance(lgb_model, figsize=(10, 10))
+lgb.plot_importance(lgb_model, figsize=(14, 10))
 plt.show()
 
 # %%
