@@ -1,4 +1,5 @@
 # %%
+import colorsys
 import math
 import os
 import re
@@ -19,9 +20,11 @@ import pandas as pd
 import psutil
 import pycld2 as cld2
 import seaborn as sns
+import umap
 from catboost import CatBoostRegressor, Pool
 from google.cloud import translate_v2 as translate
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, TruncatedSVD
+from sklearn.manifold import TSNE
 from sklearn.metrics import mean_squared_log_error
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
@@ -77,10 +80,12 @@ class Config:
     num_workers = 4
     root_dir = Path.cwd().parents[2]
     data_dir = Path.cwd().parents[2] / "data/atmacup10_dataset"
+    pca_method = "UMAP"
     principal_maker_n_components = 10
     title_n_components = 10
     long_title_n_components = 15
     desc_en_n_components = 15
+    long_title_desc_en_n_components = 15
     cat_aggs = ["count"]
     # bert_model = "_stsb_roberta_large"
     # bert_model = "_bert_base_multilingual_uncase"
@@ -100,10 +105,10 @@ class Config:
         "reg_lambda": 0.3,
         "colsample_bytree": 0.7,
         "metric": "rmse",
-        "num_threads": 6,
+        "num_threads": -1,
     }
     cat_params = {
-        "min_data_in_leaf": 64,
+        "min_data_in_leaf": 16,
         "learning_rate": 0.05,
         "reg_lambda": 0.3,
     }
@@ -289,6 +294,17 @@ def fe_material(raw: RawData) -> RawData:
 
 
 def fe_palette(raw: RawData) -> RawData:
+    h = []
+    s = []
+    v = []
+    for row in tqdm(raw.palette.itertuples(), total=len(raw.palette)):
+        hsv = colorsys.rgb_to_hsv(row.color_r, row.color_g, row.color_b)
+        h.append(hsv[0])
+        s.append(hsv[1])
+        v.append(hsv[2])
+    raw.palette["color_h"] = h
+    raw.palette["color_s"] = s
+    raw.palette["color_v"] = v
     with TimeUtil.timer("palette sum"):
         palette = (
             raw.palette.groupby("object_id")
@@ -297,6 +313,17 @@ def fe_palette(raw: RawData) -> RawData:
                     (row.ratio * row.color_r).sum(),
                     (row.ratio * row.color_g).sum(),
                     (row.ratio * row.color_b).sum(),
+                ]
+            )
+            .to_dict()
+        )
+        hsv_palette = (
+            raw.palette.groupby("object_id")
+            .apply(
+                lambda row: [
+                    (row.ratio * row.color_h).sum(),
+                    (row.ratio * row.color_s).sum(),
+                    (row.ratio * row.color_v).sum(),
                 ]
             )
             .to_dict()
@@ -320,6 +347,24 @@ def fe_palette(raw: RawData) -> RawData:
         lambda i: palette[i][2] if i in palette else np.nan
     )
 
+    raw.train["color_h"] = raw.train["object_id"].map(
+        lambda i: hsv_palette[i][0] if i in hsv_palette else np.nan
+    )
+    raw.train["color_s"] = raw.train["object_id"].map(
+        lambda i: hsv_palette[i][1] if i in hsv_palette else np.nan
+    )
+    raw.train["color_v"] = raw.train["object_id"].map(
+        lambda i: hsv_palette[i][2] if i in hsv_palette else np.nan
+    )
+    raw.test["color_h"] = raw.test["object_id"].map(
+        lambda i: hsv_palette[i][0] if i in hsv_palette else np.nan
+    )
+    raw.test["color_s"] = raw.test["object_id"].map(
+        lambda i: hsv_palette[i][1] if i in hsv_palette else np.nan
+    )
+    raw.test["color_v"] = raw.test["object_id"].map(
+        lambda i: hsv_palette[i][2] if i in hsv_palette else np.nan
+    )
     for rgb in list("rgb"):
         _df = (
             raw.palette[raw.palette["ratio"] > 0.02]
@@ -330,7 +375,18 @@ def fe_palette(raw: RawData) -> RawData:
         raw.train = raw.train.merge(_df, on="object_id", how="left")
         raw.test = raw.test.merge(_df, on="object_id", how="left")
         raw.train[f"color_{rgb}_count"] = raw.train[f"color_{rgb}_count"].fillna(0)
-        raw.train[f"color_{rgb}_mean"] = raw.train[f"color_{rgb}_count"].fillna(0)
+        raw.train[f"color_{rgb}_mean"] = raw.train[f"color_{rgb}_mean"].fillna(0)
+
+    for hsv in list("hsv"):
+        _df = (
+            raw.palette[raw.palette["ratio"] > 0.02]
+            .groupby("object_id")[f"color_{hsv}"]
+            .agg(["mean", "var"])
+        )
+        _df.columns = [f"color_{hsv}_{agg}" for agg in ["mean", "var"]]
+        raw.train = raw.train.merge(_df, on="object_id", how="left")
+        raw.test = raw.test.merge(_df, on="object_id", how="left")
+        raw.train[f"color_{hsv}_mean"] = raw.train[f"color_{hsv}_mean"].fillna(0)
     return raw
 
 
@@ -343,7 +399,20 @@ def fe_title_pca(raw: RawData, n_components: int) -> RawData:
         Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
     )
     concated = np.concatenate((train_encoded, test_encoded))
-    pca = PCA(n_components=n_components).fit(concated)
+
+    with TimeUtil.timer("pca title"):
+        if Config.pca_method == "PCA":
+            pca = PCA(n_components=n_components).fit(concated)
+        elif Config.pca_method == "TSVD":
+            pca = TruncatedSVD(n_components=n_components).fit(concated)
+        elif Config.pca_method == "TSNE":
+            pca = TSNE(n_components=n_components).fit(concated)
+        elif Config.pca_method == "UMAP":
+            pca = umap.UMAP(
+                n_components=n_components, n_neighbors=20, min_dist=1.0
+            ).fit(concated)
+        else:
+            pca = PCA(n_components=n_components).fit(concated)
     train_pca = pca.transform(train_encoded)
     test_pca = pca.transform(test_encoded)
     raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
@@ -360,7 +429,17 @@ def fe_long_title_pca(raw: RawData, n_components: int) -> RawData:
         Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
     )
     concated = np.concatenate((train_encoded, test_encoded))
-    pca = PCA(n_components=n_components).fit(concated)
+    with TimeUtil.timer("pca title"):
+        if Config.pca_method == "PCA":
+            pca = PCA(n_components=n_components).fit(concated)
+        elif Config.pca_method == "TSVD":
+            pca = TruncatedSVD(n_components=n_components).fit(concated)
+        elif Config.pca_method == "UMAP":
+            pca = umap.UMAP(
+                n_components=n_components, n_neighbors=20, min_dist=1.0
+            ).fit(concated)
+        else:
+            pca = PCA(n_components=n_components).fit(concated)
     train_pca = pca.transform(train_encoded)
     test_pca = pca.transform(test_encoded)
     raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
@@ -377,7 +456,17 @@ def fe_description_en_pca(raw: RawData, n_components: int) -> RawData:
         Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
     )
     concated = np.concatenate((train_encoded, test_encoded))
-    pca = PCA(n_components=n_components).fit(concated)
+    with TimeUtil.timer("pca description_en"):
+        if Config.pca_method == "PCA":
+            pca = PCA(n_components=n_components).fit(concated)
+        elif Config.pca_method == "TSVD":
+            pca = TruncatedSVD(n_components=n_components).fit(concated)
+        elif Config.pca_method == "UMAP":
+            pca = umap.UMAP(
+                n_components=n_components, n_neighbors=20, min_dist=1.0
+            ).fit(concated)
+        else:
+            pca = PCA(n_components=n_components).fit(concated)
     train_pca = pca.transform(train_encoded)
     test_pca = pca.transform(test_encoded)
     raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
@@ -394,7 +483,39 @@ def fe_principal_maker_pca(raw: RawData, n_components: int) -> RawData:
         Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
     )
     concated = np.concatenate((train_encoded, test_encoded))
-    pca = PCA(n_components=n_components).fit(concated)
+    with TimeUtil.timer("pca description_en"):
+        if Config.pca_method == "PCA":
+            pca = PCA(n_components=n_components).fit(concated)
+        elif Config.pca_method == "TSVD":
+            pca = TruncatedSVD(n_components=n_components).fit(concated)
+        elif Config.pca_method == "UMAP":
+            pca = umap.UMAP(
+                n_components=n_components, n_neighbors=20, min_dist=1.0
+            ).fit(concated)
+        else:
+            pca = PCA(n_components=n_components).fit(concated)
+    train_pca = pca.transform(train_encoded)
+    test_pca = pca.transform(test_encoded)
+    raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
+    raw.test.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = test_pca
+    return raw
+
+
+def fe_long_title_description_en_pca(raw: RawData, n_components: int) -> RawData:
+    col = "long_title_description_en"
+    train_encoded = np.load(
+        Config.root_dir / f"data/train_{col}_encoded{Config.bert_model}.npy"
+    )
+    test_encoded = np.load(
+        Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
+    )
+    concated = np.concatenate((train_encoded, test_encoded))
+    if Config.pca_method == "PCA":
+        pca = PCA(n_components=n_components).fit(concated)
+    elif Config.pca_method == "TSVD":
+        pca = TruncatedSVD(n_components=n_components).fit(concated)
+    else:
+        pca = PCA(n_components=n_components).fit(concated)
     train_pca = pca.transform(train_encoded)
     test_pca = pca.transform(test_encoded)
     raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
@@ -418,6 +539,7 @@ def fe(
     long_title_n_components: int,
     desc_en_n_components: int,
     principal_maker_n_components: int,
+    long_title_desc_en_n_components: int,
 ) -> RawData:
     raw = fe_sub_title(raw)
     raw = fe_historical_person(raw)
@@ -426,6 +548,7 @@ def fe(
     raw = fe_long_title_pca(raw, long_title_n_components)
     raw = fe_description_en_pca(raw, desc_en_n_components)
     raw = fe_principal_maker_pca(raw, principal_maker_n_components)
+    raw = fe_long_title_description_en_pca(raw, long_title_desc_en_n_components)
     raw = fe_title_lang(raw)
     raw = fe_color(raw)
     raw = fe_object_collection(raw)
@@ -494,11 +617,12 @@ raw = fe(
     Config.long_title_n_components,
     Config.desc_en_n_components,
     Config.principal_maker_n_components,
+    Config.long_title_desc_en_n_components,
 )
 
 
 # %%
-models = "lgbm"
+models = "cat"
 features = (
     [
         "size_h",
@@ -524,16 +648,24 @@ features = (
         "color_r",
         "color_g",
         "color_b",
+        "color_h",
+        "color_s",
+        "color_v",
         "title_lang",
         "title_len",
         "sub_title_len",
         "color_count",
     ]
     + [f"color_{rgb}_{agg}" for rgb in list("rgb") for agg in ["count", "mean", "var"]]
+    + [f"color_{hsv}_{agg}" for hsv in list("hsv") for agg in ["mean", "var"]]
     + [f"title_pca_{i}" for i in range(Config.title_n_components)]
     + [f"long_title_pca_{i}" for i in range(Config.long_title_n_components)]
     + [f"description_en_pca_{i}" for i in range(Config.desc_en_n_components)]
     + [f"principal_maker_pca_{i}" for i in range(Config.principal_maker_n_components)]
+    # + [
+    #     f"long_title_description_en_pca_{i}"
+    #     for i in range(Config.long_title_desc_en_n_components)
+    # ]
 )
 
 cat_features = [
@@ -603,7 +735,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         cat_valid_dataset = Pool(
             _valid_df[features], _valid_df["likes_log"], cat_features=cat_features
         )
-        cat_model = CatBoostRegressor(**Config.cat_params, iterations=3000)
+        cat_model = CatBoostRegressor(**Config.cat_params, iterations=3500)
         cat_model.fit(
             cat_train_dataset,
             verbose_eval=100,
@@ -641,14 +773,14 @@ cat_train_dataset = Pool(
     raw.train[features], raw.train["likes_log"], cat_features=cat_features
 )
 lgb_train_dataset = lgb.Dataset(raw.train[features], raw.train["likes_log"])
-cat_model = CatBoostRegressor(**Config.cat_params, iterations=2000)
+cat_model = CatBoostRegressor(**Config.cat_params, iterations=2200)
 cat_model.fit(
     cat_train_dataset, verbose_eval=100, eval_set=[cat_train_dataset],
 )
 lgb_model = lgb.train(
     Config.lgb_params,
     lgb_train_dataset,
-    num_boost_round=800,
+    num_boost_round=700,
     verbose_eval=50,
     valid_sets=[lgb_train_dataset],
     categorical_feature=cat_features,
@@ -658,281 +790,4 @@ test_pred_lgb = np.expm1(lgb_model.predict(raw.test[features]))
 test_pred = (test_pred_cat + test_pred_lgb) / 2
 test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
-raw.sample_submission.to_csv(Path.cwd() / "output" / "exp009_1.csv", index=False)
-
-
-# %%
-# ============================= 画像の生成 =================================
-
-
-def generate_img(
-    df: pd.DataFrame,
-    object_id: str,
-    img_width: int,
-    img_height: int,
-    save_dir: str,
-    imshow: bool = False,
-):
-    # まずはゼロ埋めで画像を生成
-    img = np.zeros((img_width, img_height, 3))
-
-    # 色の割合で行をソート
-    df = df.sort_values("ratio", ascending=False)
-
-    total_ratio = 0
-    # 1行ずつfor loop
-    for row in df.itertuples():
-        # 色埋めの初めと終わりのindexを計算
-        width_start = int(img_width * (total_ratio))
-        width_end = int(img_width * (total_ratio + row.ratio))
-
-        # 画像の色を埋めていく
-        # cv2の色順序はBGR
-        img[:, width_start:width_end, 0] = row.color_b
-        img[:, width_start:width_end, 1] = row.color_g
-        img[:, width_start:width_end, 2] = row.color_r
-
-        total_ratio += row.ratio
-
-    img = img.astype(np.int64)
-
-    # 画像を保存
-    save_path = os.path.join(save_dir, f"{object_id}.jpg")
-    cv2.imwrite(save_path, img)
-
-    if imshow:
-        # plt.imshowの色順序がRGBなのでBGR->RGBに変換
-        img_rgb = img[..., ::-1]
-        plt.imshow(img_rgb)
-        plt.show()
-
-
-group = raw.palette.groupby("object_id")
-# object_idごとにfor loop
-for (object_id, df) in tqdm(group, total=len(group)):
-    generate_img(
-        df,
-        object_id,
-        Config.img_width,
-        Config.img_height,
-        str(Config.data_dir / "images"),
-        imshow=False,
-    )
-
-# ============================= 画像の生成 end =================================
-
-# %%
-
-# ============================= PytorchのDatasetを作成 =================================
-import albumentations as A
-import torch
-from albumentations.pytorch import ToTensorV2
-from torch.utils.data import DataLoader, Dataset
-
-
-def get_train_transforms() -> A.Compose:
-    return A.Compose(
-        [
-            A.RandomResizedCrop(
-                height=Config.img_height, width=Config.img_width, p=1.0
-            ),
-            A.Transpose(p=0.5),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            A.ShiftScaleRotate(p=0.5),
-            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), p=1.0),
-            ToTensorV2(p=1.0),
-        ]
-    )
-
-
-def get_valid_transforms() -> A.Compose:
-    return A.Compose(
-        [
-            A.RandomResizedCrop(
-                height=Config.img_height, width=Config.img_width, p=1.0
-            ),
-            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), p=1.0),
-            ToTensorV2(p=1.0),
-        ]
-    )
-
-
-def _get_img(img_path: str) -> np.ndarray:
-    img_bgr = cv2.imread(img_path)
-    assert img_bgr is not None, f"{img_path} doesn't exist"
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    return img_rgb
-
-
-class AtmaDataset(Dataset):
-    def __init__(
-        self,
-        df: pd.DataFrame,
-        output_label: bool,
-        transforms: Optional[A.Compose] = None,
-    ):
-        super(AtmaDataset, self).__init__()
-        self.df = df
-        self.output_label = output_label
-        self.labels = []
-        self.transforms = transforms
-        if output_label:
-            self.labels = (df["likes"] > 0).astype("int").values
-
-        # 画像が存在するobject_idだけ使用
-        self.object_ids = [
-            object_id
-            for object_id in df["object_id"].values
-            if os.path.exists(Config.data_dir / "images" / f"{object_id}.jpg")
-        ]
-
-    def __len__(self):
-        return len(self.object_ids)
-
-    def __getitem__(self, index: int):
-        label = torch.tensor([])
-        if self.output_label:
-            label = torch.tensor(self.labels[index], dtype=torch.float)
-
-        img_path = str(Config.data_dir / "images" / f"{self.object_ids[index]}.jpg")
-        img = _get_img(img_path)
-
-        if self.transforms is not None:
-            img = self.transforms(image=img)["image"]
-
-        return {"img": img, "label": label}
-
-
-# ============================= PytorchのDatasetを作成 end =================================
-
-# %%
-# ============================= PytorchのDataLoaderを作成 =================================
-def get_cv_dataloaders(
-    df: pd.DataFrame, train_idx: np.ndarray, valid_idx: np.ndarray
-) -> Tuple[DataLoader, DataLoader]:
-    _train_df = df.loc[train_idx].reset_index(drop=True)
-    _valid_df = df.loc[valid_idx].reset_index(drop=True)
-
-    train_dataset = AtmaDataset(_train_df, True, get_train_transforms())
-    valid_dataset = AtmaDataset(_valid_df, True, get_train_transforms())
-
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=Config.batch_size,
-        num_workers=Config.num_workers,
-        shuffle=True,
-        pin_memory=False,
-        drop_last=False,
-    )
-    valid_dataloader = DataLoader(
-        valid_dataset,
-        batch_size=Config.batch_size,
-        num_workers=Config.num_workers,
-        shuffle=True,
-        pin_memory=False,
-        drop_last=False,
-    )
-    return train_dataloader, valid_dataloader
-
-
-# ============================= PytorchのDataLoaderを作成 =================================
-
-# %%
-
-# ============================= モデルを定義 =================================
-import pytorch_lightning as pl
-import sklearn.metrics
-import timm
-import torch.nn as nn
-import torch.optim
-from torch.cuda.amp import autocast
-
-
-class MyModel(nn.Module):
-    def __init__(self):
-        super(MyModel, self).__init__()
-        self.model = timm.create_model("efficientnet_b1", pretrained=True)
-        n_features = self.model.classifier.in_features
-        self.model_classifier = nn.Linear(n_features, 1)
-
-    def forward(self, x):
-        x = self.model(x)
-        return x
-
-
-class MyLitModel(pl.LightningModule):
-    def __init__(self):
-        super().__init__()
-        self.y_pred = []
-        self.y_true = []
-        self.criterion = nn.BCEWithLogitsLoss()
-        self.model = MyModel()
-
-    def forward(self, x):
-        x = self.model(x)
-        return x
-
-    def on_train_epoch_start(self) -> None:
-        self.y_pred = []
-        self.y_true = []
-
-    def on_validation_epoch_start(self) -> None:
-        self.y_pred = []
-        self.y_true = []
-
-    def step(self, batch: Dict[str, torch.Tensor]):
-        img = batch["img"]
-        label = batch["label"]
-        self.y_true += [label.detach().cpu().numpy()]
-        with autocast():
-            y_pred = self.model(img)
-            loss = self.criterion(y_pred, label)
-        self.y_pred += [y_pred.detach().cpu().numpy()]
-        return loss
-
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        loss = self.step(batch)
-        return {"loss": loss}
-
-    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        loss = self.step(batch)
-        return {"valid_loss": loss}
-
-    def validation_epoch_end(self, outputs):
-        f1_score = sklearn.metrics.f1_score(
-            np.concatenate(self.y_true), np.concatenate(self.y_pred)
-        )
-        print()
-        print(f"----------- valid f1 score {f1_score} ------------")
-        print()
-        return {"valid_score": f1_score}
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4, weight_decay=1e-6)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, T_0=10, T_mult=1, eta_min=1e-6, last_epoch=-1
-        )
-        return {"optimizer": optimizer, "lr_scheduler": scheduler}
-
-
-# ============================= モデルを定義 end =================================
-
-# %%
-# ============================= モデルを学習 =================================
-folds = StratifiedKFold(
-    n_splits=Config.n_splits, shuffle=True, random_state=Config.seed
-).split(raw.train["object_id"], raw.train["likes"])
-
-f1_scores = []
-for fold, (train_idx, valid_idx) in enumerate(folds):
-    print(f"------------------------ fold {fold} -----------------------")
-    train_dataloader, valid_dataloader = get_cv_dataloaders(
-        raw.train, train_idx, valid_idx
-    )
-    model = MyLitModel()
-    trainer = pl.Trainer(gpus=-1, max_epochs=5, progress_bar_refresh_rate=1)
-    trainer.fit(model, train_dataloader, valid_dataloader)
-# ============================= モデルを学習 end =================================
-
-# %%
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp011_3.csv", index=False)
