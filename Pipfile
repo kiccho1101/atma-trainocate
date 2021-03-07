@@ -1,0 +1,34 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+black = "*"
+flake8 = "*"
+jupyter = "*"
+
+[packages]
+torch = "*"
+torchvision = "*"
+opencv-python = "*"
+timm = "*"
+scikit-learn = "*"
+pandas = "*"
+numpy = "*"
+tqdm = "*"
+pydicom = "*"
+matplotlib = "*"
+psutil = "*"
+albumentations = "*"
+kaggle = "*"
+pytorch-lightning = "*"
+mlflow = "*"
+seaborn = "*"
+lightgbm = "*"
+catboost = "*"
+umap = "*"
+pycld2 = "*"
+
+[requires]
+python_version = "3.8"
