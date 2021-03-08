@@ -29,6 +29,7 @@ lightgbm = "*"
 catboost = "*"
 umap = "*"
 pycld2 = "*"
+stop-words = "*"
 
 [requires]
 python_version = "3.8"
