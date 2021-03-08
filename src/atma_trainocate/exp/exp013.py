@@ -207,6 +207,10 @@ def _fe_sub_title(df: pd.DataFrame) -> pd.DataFrame:
     df["sub_title_len"] = df["sub_title"].str.len()
     df["title_len"] = df["title"].str.len()
     df["title_word_num"] = df["title"].map(lambda s: len(s.split()))
+    df["title_capital_word_num"] = df["title"].map(
+        lambda s: sum([1 if word[0].isupper() else 0 for word in s.split()])
+    )
+    df[f"title_contains_the"] = df["title"].str.lower().str.contains("the")
     return df
 
 
@@ -411,17 +415,9 @@ def fe_palette(raw: RawData) -> RawData:
     return raw
 
 
-def fe_title_pca(raw: RawData, n_components: int) -> RawData:
-    col = "title"
-
-    stop_words = get_stop_words("dutch") + get_stop_words("en")
-    tfidf = TfidfVectorizer(stop_words=stop_words, min_df=10)
-    tfidf_vec = tfidf.fit(
-        raw.train[col].fillna("").tolist() + raw.test[col].fillna("").tolist()
-    )
-    train_tfidf = tfidf_vec.transform(raw.train[col].fillna("")).todense()
-    test_tfidf = tfidf_vec.transform(raw.test[col].fillna("")).todense()
-
+def fe_encoded_pca(
+    raw: RawData, n_components: int, col: str, with_tfidf: bool, pca_method: str
+) -> RawData:
     train_encoded = np.load(
         Config.root_dir / f"data/train_{col}_encoded{Config.bert_model}.npy"
     )
@@ -429,173 +425,27 @@ def fe_title_pca(raw: RawData, n_components: int) -> RawData:
         Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
     )
 
-    train_encoded = np.concatenate((train_encoded, train_tfidf), axis=1)
-    test_encoded = np.concatenate((test_encoded, test_tfidf), axis=1)
+    if with_tfidf:
+        stop_words = get_stop_words("dutch") + get_stop_words("en")
+        tfidf = TfidfVectorizer(stop_words=stop_words, min_df=10)
+        tfidf_vec = tfidf.fit(
+            raw.train[col].fillna("").tolist() + raw.test[col].fillna("").tolist()
+        )
+        train_tfidf = tfidf_vec.transform(raw.train[col].fillna("")).todense()
+        test_tfidf = tfidf_vec.transform(raw.test[col].fillna("")).todense()
+        train_encoded = np.concatenate((train_encoded, train_tfidf), axis=1)
+        test_encoded = np.concatenate((test_encoded, test_tfidf), axis=1)
 
     concated = np.concatenate((train_encoded, test_encoded))
-
-    with TimeUtil.timer("pca title"):
-        if Config.pca_method == "PCA":
+    with TimeUtil.timer(f"{pca_method} {col}"):
+        if pca_method == "PCA":
             pca = PCA(n_components=n_components).fit(concated)
-        elif Config.pca_method == "TSVD":
+        elif pca_method == "TSVD":
             pca = TruncatedSVD(n_components=n_components).fit(concated)
-        elif Config.pca_method == "TSNE":
-            pca = TSNE(n_components=n_components).fit(concated)
-        elif Config.pca_method == "UMAP":
+        elif pca_method == "UMAP":
             pca = umap.UMAP(n_components=n_components).fit(concated)
         else:
             pca = PCA(n_components=n_components).fit(concated)
-    train_pca = pca.transform(train_encoded)
-    test_pca = pca.transform(test_encoded)
-    raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
-    raw.test.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = test_pca
-    return raw
-
-
-def fe_long_title_pca(raw: RawData, n_components: int) -> RawData:
-    col = "long_title"
-
-    stop_words = get_stop_words("dutch") + get_stop_words("en")
-    tfidf = TfidfVectorizer(stop_words=stop_words, min_df=10)
-    tfidf_vec = tfidf.fit(
-        raw.train[col].fillna("").tolist() + raw.test[col].fillna("").tolist()
-    )
-    train_tfidf = tfidf_vec.transform(raw.train[col].fillna("")).todense()
-    test_tfidf = tfidf_vec.transform(raw.test[col].fillna("")).todense()
-
-    train_encoded = np.load(
-        Config.root_dir / f"data/train_{col}_encoded{Config.bert_model}.npy"
-    )
-    test_encoded = np.load(
-        Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
-    )
-
-    train_encoded = np.concatenate((train_encoded, train_tfidf), axis=1)
-    test_encoded = np.concatenate((test_encoded, test_tfidf), axis=1)
-
-    concated = np.concatenate((train_encoded, test_encoded))
-    with TimeUtil.timer("pca long_title"):
-        if Config.pca_method == "PCA":
-            pca = PCA(n_components=n_components).fit(concated)
-        elif Config.pca_method == "TSVD":
-            pca = TruncatedSVD(n_components=n_components).fit(concated)
-        elif Config.pca_method == "UMAP":
-            pca = umap.UMAP(n_components=n_components).fit(concated)
-        else:
-            pca = PCA(n_components=n_components).fit(concated)
-    train_pca = pca.transform(train_encoded)
-    test_pca = pca.transform(test_encoded)
-    raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
-    raw.test.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = test_pca
-    return raw
-
-
-def fe_description_en_pca(raw: RawData, n_components: int) -> RawData:
-    col = "description_en"
-    train_encoded = np.load(
-        Config.root_dir / f"data/train_{col}_encoded{Config.bert_model}.npy"
-    )
-    test_encoded = np.load(
-        Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
-    )
-    concated = np.concatenate((train_encoded, test_encoded))
-    with TimeUtil.timer("pca description_en"):
-        if Config.pca_method == "PCA":
-            pca = PCA(n_components=n_components).fit(concated)
-        elif Config.pca_method == "TSVD":
-            pca = TruncatedSVD(n_components=n_components).fit(concated)
-        elif Config.pca_method == "UMAP":
-            pca = umap.UMAP(n_components=n_components).fit(concated)
-        else:
-            pca = PCA(n_components=n_components).fit(concated)
-    train_pca = pca.transform(train_encoded)
-    test_pca = pca.transform(test_encoded)
-    raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
-    raw.test.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = test_pca
-    return raw
-
-
-def fe_principal_maker_pca(raw: RawData, n_components: int) -> RawData:
-    col = "principal_maker"
-    train_encoded = np.load(
-        Config.root_dir / f"data/train_{col}_encoded{Config.bert_model}.npy"
-    )
-    test_encoded = np.load(
-        Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
-    )
-    concated = np.concatenate((train_encoded, test_encoded))
-    with TimeUtil.timer("pca principal_maker"):
-        if Config.pca_method == "PCA":
-            pca = PCA(n_components=n_components).fit(concated)
-        elif Config.pca_method == "TSVD":
-            pca = TruncatedSVD(n_components=n_components).fit(concated)
-        elif Config.pca_method == "UMAP":
-            pca = umap.UMAP(n_components=n_components).fit(concated)
-        else:
-            pca = PCA(n_components=n_components).fit(concated)
-    train_pca = pca.transform(train_encoded)
-    test_pca = pca.transform(test_encoded)
-    raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
-    raw.test.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = test_pca
-    return raw
-
-
-def fe_description_pca(raw: RawData, n_components: int) -> RawData:
-    col = "description"
-
-    stop_words = get_stop_words("dutch") + get_stop_words("en")
-    tfidf = TfidfVectorizer(stop_words=stop_words, min_df=10)
-    tfidf_vec = tfidf.fit(
-        raw.train[col].fillna("").tolist() + raw.test[col].fillna("").tolist()
-    )
-    train_tfidf = tfidf_vec.transform(raw.train[col].fillna("")).todense()
-    test_tfidf = tfidf_vec.transform(raw.test[col].fillna("")).todense()
-
-    train_encoded = np.load(
-        Config.root_dir / f"data/train_{col}_encoded{Config.bert_model}.npy"
-    )
-    test_encoded = np.load(
-        Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
-    )
-
-    train_encoded = np.concatenate((train_encoded, train_tfidf), axis=1)
-    test_encoded = np.concatenate((test_encoded, test_tfidf), axis=1)
-
-    concated = np.concatenate((train_encoded, test_encoded))
-    with TimeUtil.timer("pca description"):
-        if Config.pca_method == "PCA":
-            pca = PCA(n_components=n_components).fit(concated)
-        elif Config.pca_method == "TSVD":
-            pca = TruncatedSVD(n_components=n_components).fit(concated)
-        elif Config.pca_method == "UMAP":
-            pca = umap.UMAP(n_components=n_components).fit(concated)
-        else:
-            pca = PCA(n_components=n_components).fit(concated)
-    train_pca = pca.transform(train_encoded)
-    test_pca = pca.transform(test_encoded)
-    raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
-    raw.test.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = test_pca
-    return raw
-
-
-def fe_long_title_description_en_pca(raw: RawData, n_components: int) -> RawData:
-    col = "long_title_description_en"
-
-    train_encoded = np.load(
-        Config.root_dir / f"data/train_{col}_encoded{Config.bert_model}.npy"
-    )
-    test_encoded = np.load(
-        Config.root_dir / f"data/test_{col}_encoded{Config.bert_model}.npy"
-    )
-    concated = np.concatenate((train_encoded, test_encoded))
-    if Config.pca_method == "PCA":
-        pca = PCA(n_components=n_components).fit(concated)
-    elif Config.pca_method == "TSVD":
-        pca = TruncatedSVD(n_components=n_components).fit(concated)
-    elif Config.pca_method == "UMAP":
-        pca = umap.UMAP(n_components=n_components).fit(concated)
-    else:
-        pca = PCA(n_components=n_components).fit(concated)
     train_pca = pca.transform(train_encoded)
     test_pca = pca.transform(test_encoded)
     raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
@@ -613,24 +463,28 @@ def fe_title_lang(raw: RawData) -> RawData:
     return raw
 
 
-def fe(
-    raw: RawData,
-    title_n_components: int,
-    long_title_n_components: int,
-    desc_en_n_components: int,
-    desc_n_components: int,
-    principal_maker_n_components: int,
-    long_title_desc_en_n_components: int,
-) -> RawData:
+def fe(raw: RawData,) -> RawData:
     raw = fe_sub_title(raw)
     raw = fe_historical_person(raw)
     raw = fe_material(raw)
-    raw = fe_title_pca(raw, title_n_components)
-    raw = fe_long_title_pca(raw, long_title_n_components)
-    raw = fe_description_en_pca(raw, desc_en_n_components)
-    raw = fe_principal_maker_pca(raw, principal_maker_n_components)
-    # raw = fe_long_title_description_en_pca(raw, long_title_desc_en_n_components)
-    raw = fe_description_pca(raw, desc_n_components)
+    raw = fe_encoded_pca(raw, Config.title_n_components, "title", True, "PCA")
+    raw = fe_encoded_pca(
+        raw, Config.long_title_n_components, "long_title", False, "PCA"
+    )
+    raw = fe_encoded_pca(raw, Config.desc_n_components, "description", True, "PCA")
+    raw = fe_encoded_pca(
+        raw, Config.desc_en_n_components, "description_en", True, "PCA"
+    )
+    raw = fe_encoded_pca(
+        raw, Config.principal_maker_n_components, "principal_maker", False, "PCA"
+    )
+    # raw = fe_encoded_pca(
+    #     raw,
+    #     Config.long_title_desc_en_n_components,
+    #     "long_title_description_en",
+    #     True,
+    #     "PCA",
+    # )
     raw = fe_title_lang(raw)
     raw = fe_color(raw)
     raw = fe_object_collection(raw)
@@ -694,15 +548,10 @@ with TimeUtil.timer("load raw data"):
 
 GlobalUtil.seed_everything(Config.seed)
 raw.train["likes_log"] = np.log1p(raw.train["likes"])
-raw = fe(
-    raw,
-    Config.title_n_components,
-    Config.long_title_n_components,
-    Config.desc_en_n_components,
-    Config.desc_n_components,
-    Config.principal_maker_n_components,
-    Config.long_title_desc_en_n_components,
+raw.train["long_title_description_en"] = (
+    raw.train["long_title"] + " " + raw.train["description_en"]
 )
+raw = fe(raw)
 
 
 # %%
@@ -737,7 +586,10 @@ features = (
         "color_v",
         "title_lang",
         "title_len",
+        "title_word_num",
+        "title_capital_word_num",
         "sub_title_len",
+        "title_contains_the",
         "color_count",
     ]
     + [f"color_{rgb}_{agg}" for rgb in list("rgb") for agg in ["count", "mean", "var"]]
@@ -860,9 +712,7 @@ cat_train_dataset = Pool(
 lgb_train_dataset = lgb.Dataset(raw.train[features], raw.train["likes_log"])
 cat_model = CatBoostRegressor(**Config.cat_params, iterations=2000)
 cat_model.fit(
-    cat_train_dataset,
-    verbose_eval=100,
-    eval_set=[cat_train_dataset],
+    cat_train_dataset, verbose_eval=100, eval_set=[cat_train_dataset],
 )
 lgb_model = lgb.train(
     Config.lgb_params,
@@ -879,56 +729,6 @@ test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
 raw.sample_submission.to_csv(Path.cwd() / "output" / "exp012_1.csv", index=False)
 
-# %%
-
-
-def generate_img(
-    df: pd.DataFrame,
-    object_id: str,
-    img_width: int,
-    img_height: int,
-    save_dir: Optional[str],
-    imshow: bool = False,
-) -> np.ndarray:
-    img = np.zeros((img_width, img_height, 3))
-    df = df.sort_values("ratio", ascending=False)
-
-    total_ratio = 0
-    for row in df.itertuples():
-        width_start = int(img_width * (total_ratio))
-        width_end = int(img_width * (total_ratio + row.ratio))
-
-        img[:, width_start:width_end, 0] = row.color_b
-        img[:, width_start:width_end, 1] = row.color_g
-        img[:, width_start:width_end, 2] = row.color_r
-
-        total_ratio += row.ratio
-
-    img = img.astype(np.int64)
-
-    if save_dir is not None:
-        save_path = os.path.join(save_dir, f"{object_id}.jpg")
-        cv2.imwrite(save_path, img)
-
-    if imshow:
-        # plt.imshowの色順序がRGBなのでBGR->RGBに変換
-        img_rgb = img[..., ::-1]
-        plt.imshow(img_rgb)
-        plt.show()
-
-    return img
-
-
-group = raw.palette.groupby("object_id")
-for (object_id, df) in tqdm(group, total=len(group)):
-    generate_img(
-        df,
-        object_id,
-        Config.img_width,
-        Config.img_height,
-        str(Config.data_dir / "images"),
-        imshow=False,
-    )
 
 # %%
 raw.train.sort_values("likes", ascending=False)[
@@ -953,32 +753,6 @@ raw.train[f"title_contains_{s}"] = raw.train["title"].str.lower().str.contains(s
 raw.train.groupby([f"title_contains_{s}"])["likes_log"].agg(["count", "mean"])
 
 # %%
-raw.train["title_capital_word_num"] = raw.train["title"].map(
-    lambda s: sum([1 if word[0].isupper() else 0 for word in s.split()])
-)
-raw.train.groupby(["title_capital_word_num"])["likes_log"].agg(["count", "mean"])
-
-# %%
 raw.train.groupby("principal_or_first_maker")["likes_log"].agg(
     ["count", "mean", "var"]
 ).sort_values("count", ascending=False)[:20]
-
-# %%
-raw.train.query("principal_or_first_maker == 'Aegidius Sadeler'").sort_values(
-    "likes", ascending=True
-)[
-    [
-        "likes",
-        "likes_log",
-        "title_lang",
-        "title",
-        "principal_or_first_maker",
-        "dating_year_early",
-        "dating_year_late",
-        "dating_presenting_date",
-    ]
-].reset_index(
-    drop=True
-)[
-    :20
-]
