@@ -27,6 +27,7 @@ import torch.backends.cudnn
 import torch.cuda
 import umap
 from catboost import CatBoostRegressor, Pool
+from fasttext import load_model
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.manifold import TSNE
@@ -105,10 +106,12 @@ class Config:
     desc_en_n_components = 15
     desc_n_components = 15
     long_title_desc_en_n_components = 15
+    color_n_components = 3
     cat_aggs = ["count"]
     # bert_model = "_stsb_roberta_large"
     # bert_model = "_bert_base_multilingual_uncase"
-    bert_model = "_bert_base_multilingual_case"
+    # bert_model = "_bert_base_multilingual_case"
+    bert_model = "_bert_base_multilingual_case_mean"
     # bert_model = ""
     lgb_params = {
         "num_leaves": 64,
@@ -210,13 +213,31 @@ def _fe_sub_title(df: pd.DataFrame) -> pd.DataFrame:
     df["title_capital_word_num"] = df["title"].map(
         lambda s: sum([1 if word[0].isupper() else 0 for word in s.split()])
     )
-    df[f"title_contains_the"] = df["title"].str.lower().str.contains("the")
+    df["title_contains_the"] = df["title"].str.lower().str.contains("the")
+    df["description_en_len"] = df["description_en"].fillna("").str.len()
+    df["description_en_word_num"] = (
+        df["description_en"].fillna("").map(lambda s: len(s.split()))
+    )
     return df
 
 
 def fe_sub_title(raw: RawData) -> RawData:
     raw.train = _fe_sub_title(raw.train)
     raw.test = _fe_sub_title(raw.test)
+    return raw
+
+
+def _fe_dating(df: pd.DataFrame) -> pd.DataFrame:
+    df["dating_year_diff"] = df["dating_year_late"] - df["dating_year_early"]
+    df["dating_acquisition_diff"] = (
+        pd.to_datetime(df["acquisition_date"]).dt.year - df["dating_sorting_date"]
+    )
+    return df
+
+
+def fe_dating(raw: RawData) -> RawData:
+    raw.train = _fe_dating(raw.train)
+    raw.test = _fe_dating(raw.test)
     return raw
 
 
@@ -400,6 +421,8 @@ def fe_palette(raw: RawData) -> RawData:
         raw.test = raw.test.merge(_df, on="object_id", how="left")
         raw.train[f"color_{rgb}_count"] = raw.train[f"color_{rgb}_count"].fillna(0)
         raw.train[f"color_{rgb}_mean"] = raw.train[f"color_{rgb}_mean"].fillna(0)
+        raw.test[f"color_{rgb}_count"] = raw.test[f"color_{rgb}_count"].fillna(0)
+        raw.test[f"color_{rgb}_mean"] = raw.test[f"color_{rgb}_mean"].fillna(0)
 
     for hsv in list("hsv"):
         _df = (
@@ -412,6 +435,52 @@ def fe_palette(raw: RawData) -> RawData:
         raw.test = raw.test.merge(_df, on="object_id", how="left")
         raw.train[f"color_{hsv}_mean"] = raw.train[f"color_{hsv}_mean"].fillna(0)
         raw.test[f"color_{hsv}_mean"] = raw.test[f"color_{hsv}_mean"].fillna(0)
+    return raw
+
+
+def fe_color_pca(raw: RawData, n_components: int, pca_method: str):
+    colors = defaultdict(list)
+    ratios = defaultdict(list)
+    _df = raw.palette.sort_values(["object_id", "ratio"], ascending=False)
+    for row in tqdm(_df.itertuples(), total=len(_df)):
+        for _ in range(6):
+            ratios[row.object_id].append(row.ratio)
+        colors[row.object_id].append(row.color_r)
+        colors[row.object_id].append(row.color_g)
+        colors[row.object_id].append(row.color_b)
+        hsv = colorsys.rgb_to_hsv(row.color_r, row.color_g, row.color_b)
+        colors[row.object_id].append(hsv[0])
+        colors[row.object_id].append(hsv[1])
+        colors[row.object_id].append(hsv[2])
+
+    for object_id in (
+        raw.train["object_id"].unique().tolist()
+        + raw.test["object_id"].unique().tolist()
+    ):
+        if object_id not in colors:
+            ratios[object_id] = [0] * 132
+            colors[object_id] = [0] * 132
+
+    train_encoded = np.stack(raw.train["object_id"].map(colors).values)
+    test_encoded = np.stack(raw.test["object_id"].map(colors).values)
+
+    n_components = 10
+    pca_method = "PCA"
+
+    concated = np.concatenate((train_encoded, test_encoded))
+    with TimeUtil.timer(f"{pca_method} color"):
+        if pca_method == "PCA":
+            pca = PCA(n_components=n_components).fit(concated)
+        elif pca_method == "TSVD":
+            pca = TruncatedSVD(n_components=n_components).fit(concated)
+        elif pca_method == "UMAP":
+            pca = umap.UMAP(n_components=n_components).fit(concated)
+        else:
+            pca = PCA(n_components=n_components).fit(concated)
+        train_pca = pca.transform(train_encoded)
+        test_pca = pca.transform(test_encoded)
+    raw.train.loc[:, [f"color_pca_{i}" for i in range(n_components)]] = train_pca
+    raw.test.loc[:, [f"color_pca_{i}" for i in range(n_components)]] = test_pca
     return raw
 
 
@@ -446,34 +515,63 @@ def fe_encoded_pca(
             pca = umap.UMAP(n_components=n_components).fit(concated)
         else:
             pca = PCA(n_components=n_components).fit(concated)
-    train_pca = pca.transform(train_encoded)
-    test_pca = pca.transform(test_encoded)
+        train_pca = pca.transform(train_encoded)
+        test_pca = pca.transform(test_encoded)
     raw.train.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = train_pca
     raw.test.loc[:, [f"{col}_pca_{i}" for i in range(n_components)]] = test_pca
     return raw
 
 
 def fe_title_lang(raw: RawData) -> RawData:
-    raw.train["title_lang"] = (
-        raw.train["title"].fillna("").map(lambda x: cld2.detect(x)[2][0][1])
-    )
-    raw.test["title_lang"] = (
-        raw.test["title"].fillna("").map(lambda x: cld2.detect(x)[2][0][1])
-    )
+    model = load_model(str(Config.root_dir / "data/lid.176.bin"))
+    with TimeUtil.timer("title lang"):
+        raw.train["title_lang"] = (
+            raw.train["title"]
+            .fillna("")
+            .map(lambda x: model.predict(x.replace("\n", ""))[0][0])
+        )
+        raw.test["title_lang"] = (
+            raw.test["title"]
+            .fillna("")
+            .map(lambda x: model.predict(x.replace("\n", ""))[0][0])
+        )
     return raw
+
+
+def target_encoding(
+    train_df: pd.DataFrame, valid_df: pd.DataFrame
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    target_mean = train_df["likes_log"].mean()
+    _df = (
+        train_df.groupby("principal_or_first_maker")["likes_log"]
+        .agg("mean")
+        .reset_index()
+    )
+    _df.columns = ["principal_or_first_maker", "principal_or_first_maker_target_mean"]
+    train_df = train_df.merge(_df, on="principal_or_first_maker", how="left")
+    valid_df = valid_df.merge(_df, on="principal_or_first_maker", how="left")
+    train_df["principal_or_first_maker_target_mean"] = train_df[
+        "principal_or_first_maker_target_mean"
+    ].fillna(target_mean)
+    valid_df["principal_or_first_maker_target_mean"] = valid_df[
+        "principal_or_first_maker_target_mean"
+    ].fillna(target_mean)
+    return train_df, valid_df
 
 
 def fe(raw: RawData,) -> RawData:
     raw = fe_sub_title(raw)
+    raw = fe_dating(raw)
     raw = fe_historical_person(raw)
     raw = fe_material(raw)
+    raw = fe_color_pca(raw, Config.color_n_components, "PCA")
     raw = fe_encoded_pca(raw, Config.title_n_components, "title", True, "PCA")
     raw = fe_encoded_pca(
         raw, Config.long_title_n_components, "long_title", False, "PCA"
     )
-    raw = fe_encoded_pca(raw, Config.desc_n_components, "description", True, "PCA")
+    # raw = fe_encoded_pca(raw, Config.desc_n_components, "description", True, "PCA")
     raw = fe_encoded_pca(
-        raw, Config.desc_en_n_components, "description_en", True, "PCA"
+        raw, Config.desc_en_n_components, "description_en", True, "UMAP"
     )
     raw = fe_encoded_pca(
         raw, Config.principal_maker_n_components, "principal_maker", False, "PCA"
@@ -555,7 +653,7 @@ raw = fe(raw)
 
 
 # %%
-models = "lgbm"
+models = "lgbm+cat"
 features = (
     [
         "size_h",
@@ -591,6 +689,11 @@ features = (
         "sub_title_len",
         "title_contains_the",
         "color_count",
+        # "description_en_word_num",
+        # "description_en_len",
+        # "dating_acquisition_diff",
+        # "dating_year_diff"
+        # "principal_or_first_maker_target_mean"
     ]
     + [f"color_{rgb}_{agg}" for rgb in list("rgb") for agg in ["count", "mean", "var"]]
     + [f"color_{hsv}_{agg}" for hsv in list("hsv") for agg in ["mean", "var"]]
@@ -603,6 +706,7 @@ features = (
     #     f"long_title_description_en_pca_{i}"
     #     for i in range(Config.long_title_desc_en_n_components)
     # ]
+    # + [f"color_pca_{i}" for i in range(Config.color_n_components)]
 )
 
 cat_features = [
@@ -646,10 +750,14 @@ mlflow.log_param("cat_features", "\n,".join(cat_features))
 if "lgbm" in models:
     mlflow.lightgbm.autolog()
 rmsles = []
+lgb_models = {}
+cat_models = {}
 for fold, (train_idx, valid_idx) in enumerate(folds):
     print(f"------------------------ fold {fold} -----------------------")
     _train_df = raw.train.loc[train_idx]
     _valid_df = raw.train.loc[valid_idx]
+
+    # _train_df, _valid_df = target_encoding(_train_df, _valid_df)
 
     if models in ["lgbm+cat", "lgbm"]:
         lgb_train_dataset = lgb.Dataset(_train_df[features], _train_df["likes_log"])
@@ -664,6 +772,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
             categorical_feature=cat_features,
         )
         y_pred_lgb = np.expm1(lgb_model.predict(_valid_df[features]))
+        lgb_models[fold] = lgb_model
 
     if models in ["lgbm+cat", "cat"]:
         cat_train_dataset = Pool(
@@ -680,6 +789,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
             early_stopping_rounds=200,
         )
         y_pred_cat = np.expm1(cat_model.predict(_valid_df[features]))
+        cat_models[fold] = cat_model
 
     if models == "lgbm+cat":
         y_pred = (y_pred_cat + y_pred_lgb) / 2
@@ -706,6 +816,7 @@ if "lgbm" in models:
 mlflow.end_run()
 
 # %%
+# raw.train, raw.test = target_encoding(raw.train, raw.test)
 cat_train_dataset = Pool(
     raw.train[features], raw.train["likes_log"], cat_features=cat_features
 )
@@ -717,7 +828,7 @@ cat_model.fit(
 lgb_model = lgb.train(
     Config.lgb_params,
     lgb_train_dataset,
-    num_boost_round=700,
+    num_boost_round=500,
     verbose_eval=50,
     valid_sets=[lgb_train_dataset],
     categorical_feature=cat_features,
@@ -727,7 +838,18 @@ test_pred_lgb = np.expm1(lgb_model.predict(raw.test[features]))
 test_pred = (test_pred_cat + test_pred_lgb) / 2
 test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
-raw.sample_submission.to_csv(Path.cwd() / "output" / "exp012_1.csv", index=False)
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp013_4.csv", index=False)
+
+# %%
+test_pred_all = np.zeros((10, len(raw.test)))
+for fold in range(Config.n_splits):
+    test_pred_all[fold, :] = np.expm1(cat_models[fold].predict(raw.test[features]))
+for fold in range(Config.n_splits):
+    test_pred_all[5 + fold, :] = np.expm1(lgb_models[fold].predict(raw.test[features]))
+test_pred = test_pred_all.mean(axis=0)
+test_pred[test_pred < 0] = 0
+raw.sample_submission["likes"] = test_pred
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp013_7.csv", index=False)
 
 
 # %%
@@ -747,12 +869,3 @@ raw.palette.query("object_id == '0012765f7a97ccc3e9e9'").sort_values(
 raw.train["title_len_cut"] = pd.qcut(raw.train["title_len"], 10)
 raw.train.groupby("title_len_cut")["likes_log"].agg(["count", "mean"])
 
-# %%
-s = "the"
-raw.train[f"title_contains_{s}"] = raw.train["title"].str.lower().str.contains(s)
-raw.train.groupby([f"title_contains_{s}"])["likes_log"].agg(["count", "mean"])
-
-# %%
-raw.train.groupby("principal_or_first_maker")["likes_log"].agg(
-    ["count", "mean", "var"]
-).sort_values("count", ascending=False)[:20]

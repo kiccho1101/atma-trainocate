@@ -27,7 +27,7 @@ mlflow = "*"
 seaborn = "*"
 lightgbm = "*"
 catboost = "*"
-umap = "*"
+umap-learn = "*"
 pycld2 = "*"
 stop-words = "*"
 
