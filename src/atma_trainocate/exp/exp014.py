@@ -998,3 +998,6 @@ test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
 raw.sample_submission.to_csv(Path.cwd() / "output" / "exp014_1.csv", index=False)
 
+
+# %%
+raw.technique.groupby("name").agg(["count"])
