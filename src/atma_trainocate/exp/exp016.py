@@ -31,7 +31,7 @@ import torch.cuda
 import umap
 import xgboost as xgb
 from catboost import CatBoostRegressor, Pool
-from fasttext import load_model
+# from fasttext import load_model
 from optuna.integration.lightgbm import LightGBMTunerCV
 from optuna.trial import Trial
 from sklearn.decomposition import PCA, TruncatedSVD
@@ -266,8 +266,9 @@ def cat_encoding(raw: RawData, col: str) -> RawData:
             exists = True
     if exists:
         return raw
-    _agg_df = raw.train.groupby(col)["likes_log"].agg(Config.cat_aggs)
-    _agg_df.columns = [f"{col}_{agg}" for agg in Config.cat_aggs]
+    _df = pd.concat([raw.train, raw.test], axis=0).reset_index(drop=True)
+    _agg_df = _df.groupby(col)["likes_log"].agg(Config.cat_aggs)
+    _agg_df.columns = [f"{col}_{agg}" for agg in Config.cat_aags]
     raw.train = raw.train.merge(_agg_df, on=col, how="left")
     raw.test = raw.test.merge(_agg_df, on=col, how="left")
 
@@ -402,7 +403,10 @@ def fe_technique(raw: RawData) -> Tuple[RawData, int]:
     col_num = mat.shape[1]
     columns = [f"technique_{i}" for i in range(col_num)]
 
-    _df = pd.concat([_df, pd.DataFrame(mat, columns=columns)], axis=1,)
+    _df = pd.concat(
+        [_df, pd.DataFrame(mat, columns=columns)],
+        axis=1,
+    )
     _df = _df.drop("name_", axis=1)
 
     raw.train = raw.train.merge(_df, on="object_id", how="left")
@@ -827,7 +831,9 @@ def objective(trial: Trial):
     return rmsle
 
 
-def fe(raw: RawData,) -> RawData:
+def fe(
+    raw: RawData,
+) -> RawData:
     raw = fe_sub_title(raw)
     raw = fe_dating(raw)
     raw = fe_historical_person(raw)
@@ -1207,7 +1213,9 @@ cat_train_dataset = Pool(
 lgb_train_dataset = lgb.Dataset(raw.train[features], raw.train["likes_log"])
 cat_model = CatBoostRegressor(**Config.cat_params, iterations=4000)
 cat_model.fit(
-    cat_train_dataset, verbose_eval=100, eval_set=[cat_train_dataset],
+    cat_train_dataset,
+    verbose_eval=100,
+    eval_set=[cat_train_dataset],
 )
 lgb_model = lgb.train(
     Config.lgb_params,
@@ -1252,3 +1260,68 @@ raw.sample_submission["likes"] = test_pred
 raw.sample_submission.to_csv(Path.cwd() / "output" / "exp014-1_1.csv", index=False)
 
 # %%
+def fe_historical_person(raw: RawData) -> RawData:
+    _counts = raw.historical_person["name"].value_counts()
+    use_names = list(_counts[_counts > 30].index)
+    _df = raw.historical_person[raw.historical_person["name"].isin(use_names)].copy()
+    historical_person_df = pd.crosstab(_df["object_id"], _df["name"])
+    for col in historical_person_df.columns:
+        if col in raw.train.columns:
+            raw.train.drop(col, axis=0, inplace=True)
+            raw.test.drop(col, axis=0, inplace=True)
+    raw.train = raw.train.merge(historical_person_df, on="object_id", how="left")
+    raw.test = raw.test.merge(historical_person_df, on="object_id", how="left")
+    for col in historical_person_df.columns:
+        raw.train[col] = raw.train[col].fillna(0)
+        raw.test[col] = raw.test[col].fillna(0)
+    return raw
+
+
+def fe_description_count(raw: RawData) -> RawData:
+    desc_counts = pd.concat([raw.train, raw.test], axis=0)["description"].value_counts()
+    raw.train["description_count"] = raw.train["description"].map(desc_counts)
+    raw.test["description_count"] = raw.test["description"].map(desc_counts)
+    return raw
+
+
+def fe_occupation(raw: RawData) -> RawData:
+    _occ_df = pd.crosstab(
+        raw.principal_maker_occupation["id"], raw.principal_maker_occupation["name"]
+    )
+    _occ_df.columns = [f"occ_is_{col}" for col in _occ_df.columns]
+    _df = raw.principal_maker.merge(_occ_df, on="id", how="left")
+
+    _df = _df.groupby("object_id").first()
+    raw.train = raw.train.merge(_df, on="object_id", how="left")
+    raw.test = raw.test.merge(_df, on="object_id", how="left")
+    return raw
+
+def fe_qualification(raw: RawData) -> RawData:
+    _df = pd.crosstab(raw.principal_maker["object_id"], raw.principal_maker["qualification"])
+    _df.columns = [f"qualification_is_{col}" for col in _df.columns]
+    raw.train = raw.train.merge(_df, on="object_id", how="left")
+    raw.test = raw.test.merge(_df, on="object_id", how="left")
+    return raw
+
+
+raw = fe_historical_person(raw)
+raw = fe_description_count(raw)
+raw = fe_occupation(raw)
+raw = fe_qualification(raw)
+
+# %%
+
+_df = raw.principal_maker.groupby("object_id").first()
+raw.train = raw.train.merge(_df, on="object_id", how="left")
+
+# %%
+fig, ax = plt.subplots(figsize=(20, 6))
+RainCloud(
+    y=raw.train["likes_log"],
+    x=raw.train["qualification"],
+    ax=ax,
+)
+ax.grid()
+
+# %%
+raw.train.groupby("qualification")["likes_log"].agg(["count", "mean", "std"]).sort_values("mean")

@@ -30,6 +30,9 @@ catboost = "*"
 umap-learn = "*"
 pycld2 = "*"
 stop-words = "*"
+optuna = "*"
+xgboost = "*"
+ptitprince = "*"
 
 [requires]
 python_version = "3.8"
