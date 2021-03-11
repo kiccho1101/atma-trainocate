@@ -116,7 +116,7 @@ class Config:
     color_n_components = 3
     material_n_components = 10
     technique_n_components = 5
-    colorspace_n_components = 10
+    colorspace_n_components = 30
     title_maker_n_components = 15
     technique_col_num = 32
     object_collections = ["prints", "paintings", "other"]
@@ -163,6 +163,15 @@ class Config:
         "grow_policy": "Lossguide",
         "random_seed": seed,
     }
+    cat_params = {
+        "grow_policy": "Lossguide",
+        "random_seed": seed,
+        "depth": 20,
+        "num_leaves": 250,
+        "min_data_in_leaf": 28,
+        "learning_rate": 0.0051686369060981,
+        "reg_lambda": 0.3,
+    }
     xgb_params = {
         "num_leaves": 89,
         "min_data_in_leaf": 20,
@@ -175,6 +184,44 @@ class Config:
         "colsample_bytree": 0.7,
         "metric": "rmse",
     }
+
+
+{
+    "depth": 30,
+    "num_leaves": 146,
+    "min_data_in_leaf": 48,
+    "learning_rate": 0.013776138788920873,
+    "reg_lambda": 0.24785444165604187,
+}
+{
+    "depth": 14,
+    "num_leaves": 200,
+    "min_data_in_leaf": 7,
+    "learning_rate": 0.01096658270026146,
+    "reg_lambda": 0.03125474578559077,
+}
+{
+    "depth": 20,
+    "num_leaves": 138,
+    "min_data_in_leaf": 20,
+    "learning_rate": 0.010070282024956259,
+    "reg_lambda": 0.012419909785704676,
+}
+
+{
+    "depth": 27,
+    "num_leaves": 250,
+    "min_data_in_leaf": 28,
+    "learning_rate": 0.0051686369060981,
+    "reg_lambda": 0.4182381007114778,
+}
+{
+    "depth": 17,
+    "num_leaves": 231,
+    "min_data_in_leaf": 20,
+    "learning_rate": 0.005404462231314783,
+    "reg_lambda": 0.07032144600604655,
+}
 
 
 class MlflowUtil:
@@ -290,8 +337,15 @@ def fe_dating(raw: RawData) -> RawData:
 
 
 def fe_colorspace_pca(raw: RawData) -> RawData:
+    pca = PCA(n_components=Config.colorspace_n_components)
+    reduced = pca.fit_transform(
+        raw.colorspace_selected_pca.filter(like="color_").values
+    )
+    for i in range(Config.colorspace_n_components):
+        raw.colorspace_selected_pca[f"colorspace_pca_{i}"] = reduced[:, i]
     _df = raw.colorspace_selected_pca[
-        ["object_id"] + [f"PC{i}" for i in range(1, Config.colorspace_n_components + 1)]
+        ["object_id"]
+        + [f"colorspace_pca_{i}" for i in range(Config.colorspace_n_components)]
     ]
     raw.train = raw.train.merge(_df, on="object_id", how="left")
     raw.test = raw.test.merge(_df, on="object_id", how="left")
@@ -754,9 +808,9 @@ def objective(trial: Trial):
     )
     params = {
         "depth": trial.suggest_int("depth", 4, 30),
-        "num_leaves": trial.suggest_int("num_leaves", 16, 200),
+        "num_leaves": trial.suggest_int("num_leaves", 16, 300),
         "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 4, 50),
-        "learning_rate": trial.suggest_loguniform("learning_rate", 0.01, 0.3),
+        "learning_rate": trial.suggest_loguniform("learning_rate", 0.001, 0.3),
         "reg_lambda": trial.suggest_loguniform("reg_lambda", 0.01, 0.5),
     }
     cat_model = CatBoostRegressor(**params, iterations=3500, grow_policy="Lossguide")
@@ -835,6 +889,7 @@ def fillna(raw: RawData) -> RawData:
         "size_w",
         "size_t",
         "size_d",
+        "size_hw_ratio",
         "size_area",
         "dating_year_early",
         "dating_year_late",
@@ -844,7 +899,7 @@ def fillna(raw: RawData) -> RawData:
         "color_h_std",
         "color_s_std",
         "color_v_std",
-    ] + [f"PC{i}" for i in range(1, Config.colorspace_n_components + 1)]
+    ] + [f"colorspace_pca_{i}" for i in range(Config.colorspace_n_components)]
     _df = pd.concat([raw.train, raw.test], axis=0).reset_index(drop=True)
     for col in fill_zero_cols:
         raw.train[col] = raw.train[col].fillna(0)
@@ -867,7 +922,7 @@ def get_pseudo_df(raw: RawData) -> pd.DataFrame:
         _test_df = df[df["is_train"] == 0].reset_index(drop=True)
         train_len = len(_train_df)
         test_len = len(_test_df)
-        if train_len > 2 and test_len > 0:
+        if train_len > 1 and test_len > 0:
             likes_log_mean = _train_df["likes_log"].mean()
             _test_df["likes_log"] = likes_log_mean
             pseudo_df = pd.concat([pseudo_df, _test_df], axis=0)
@@ -926,7 +981,7 @@ features = (
         "size_area",
         "size_hw_ratio",
         "max_percentage",
-        "max_hex",
+        # "max_hex",
         "principal_maker",
         "principal_or_first_maker",
         "copyright_holder",
@@ -981,7 +1036,7 @@ features = (
     #     for i in range(Config.long_title_desc_en_n_components)
     # ]
     # + [f"color_pca_{i}" for i in range(Config.color_n_components)]
-    # + [f"PC{i}" for i in range(1, 11)]
+    # + [f"colorspace_pca_{i}" for i in range(Config.colorspace_n_components)]
     + [f"material_pca_{i}" for i in range(Config.material_n_components)]
     + [f"technique_pca_{i}" for i in range(Config.technique_n_components)]
     + [f"object_collection_{col}" for col in Config.object_collections]
@@ -1038,6 +1093,8 @@ rmsles = []
 lgb_models = {}
 cat_models = {}
 xgb_models = {}
+studies = {}
+# train_folds = [3, 4]
 train_folds = [0, 1, 2, 3, 4]
 for fold, (train_idx, valid_idx) in enumerate(folds):
     if fold not in train_folds:
@@ -1048,8 +1105,8 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
 
     if models == "cato":
         study = optuna.create_study()
-        study.optimize(objective, n_trials=100)
-        os._exit(0)
+        study.optimize(objective, n_trials=20)
+        studies[fold] = study
 
     # _train_df, _valid_df = target_encoding(_train_df, _valid_df)
 
@@ -1059,7 +1116,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         lgb_model = lgb.train(
             Config.lgb_params,
             lgb_train_dataset,
-            num_boost_round=1500,
+            num_boost_round=2000,
             valid_sets=[lgb_train_dataset, lgb_valid_dataset],
             verbose_eval=50,
             early_stopping_rounds=300,
@@ -1075,7 +1132,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         cat_valid_dataset = Pool(
             _valid_df[features], _valid_df["likes_log"], cat_features=cat_features
         )
-        cat_model = CatBoostRegressor(**Config.cat_params, iterations=3500)
+        cat_model = CatBoostRegressor(**Config.cat_params, iterations=4500)
         cat_model.fit(
             cat_train_dataset,
             verbose_eval=100,
@@ -1117,14 +1174,15 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
     elif models == "xgb":
         y_pred = y_pred_xgb
 
-    y_pred[y_pred < 0] = 0
-    y_true = _valid_df["likes"].values
-    rmsle = np.sqrt(mean_squared_log_error(y_true, y_pred))
-    rmsles.append(rmsle)
-    mlflow.log_metric(f"rmsle_{fold}", rmsle)
-    print(f"------------------------ fold {fold} -----------------------")
-    print(f"------------------- rmsle {rmsle} -----------------------")
-    print()
+    if models != "cato":
+        y_pred[y_pred < 0] = 0
+        y_true = _valid_df["likes"].values
+        rmsle = np.sqrt(mean_squared_log_error(y_true, y_pred))
+        rmsles.append(rmsle)
+        mlflow.log_metric(f"rmsle_{fold}", rmsle)
+        print(f"------------------------ fold {fold} -----------------------")
+        print(f"------------------- rmsle {rmsle} -----------------------")
+        print()
 
 print("")
 print(f"------------------- average rmsle {np.mean(rmsles)} -----------------------")
@@ -1147,14 +1205,14 @@ cat_train_dataset = Pool(
     raw.train[features], raw.train["likes_log"], cat_features=cat_features
 )
 lgb_train_dataset = lgb.Dataset(raw.train[features], raw.train["likes_log"])
-cat_model = CatBoostRegressor(**Config.cat_params, iterations=2000)
+cat_model = CatBoostRegressor(**Config.cat_params, iterations=4000)
 cat_model.fit(
     cat_train_dataset, verbose_eval=100, eval_set=[cat_train_dataset],
 )
 lgb_model = lgb.train(
     Config.lgb_params,
     lgb_train_dataset,
-    num_boost_round=1200,
+    num_boost_round=1300,
     verbose_eval=50,
     valid_sets=[lgb_train_dataset],
     categorical_feature=cat_features,
@@ -1164,7 +1222,7 @@ test_pred_lgb = np.expm1(lgb_model.predict(raw.test[features]))
 test_pred = 0.5 * test_pred_cat + 0.5 * test_pred_lgb
 test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
-raw.sample_submission.to_csv(Path.cwd() / "output" / "exp014-2_1.csv", index=False)
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp016_3.csv", index=False)
 
 # %%
 raw.test = raw.test.merge(
