@@ -266,9 +266,8 @@ def cat_encoding(raw: RawData, col: str) -> RawData:
             exists = True
     if exists:
         return raw
-    _df = pd.concat([raw.train, raw.test], axis=0).reset_index(drop=True)
-    _agg_df = _df.groupby(col)["likes_log"].agg(Config.cat_aggs)
-    _agg_df.columns = [f"{col}_{agg}" for agg in Config.cat_aags]
+    _agg_df = raw.train.groupby(col)["likes_log"].agg(Config.cat_aggs)
+    _agg_df.columns = [f"{col}_{agg}" for agg in Config.cat_aggs]
     raw.train = raw.train.merge(_agg_df, on=col, how="left")
     raw.test = raw.test.merge(_agg_df, on=col, how="left")
 
@@ -972,7 +971,7 @@ raw = fe(raw)
 
 # %%
 
-models = "lgbm+cat"
+models = "lgbm"
 features = (
     [
         "size_h",
@@ -1253,72 +1252,3 @@ raw.sample_submission["likes"] = test_pred
 raw.sample_submission.to_csv(Path.cwd() / "output" / "exp014-1_1.csv", index=False)
 
 # %%
-def fe_historical_person(raw: RawData) -> RawData:
-    _counts = raw.historical_person["name"].value_counts()
-    use_names = list(_counts[_counts > 30].index)
-    _df = raw.historical_person[raw.historical_person["name"].isin(use_names)].copy()
-    historical_person_df = pd.crosstab(_df["object_id"], _df["name"])
-    for col in historical_person_df.columns:
-        if col in raw.train.columns:
-            raw.train.drop(col, axis=0, inplace=True)
-            raw.test.drop(col, axis=0, inplace=True)
-    raw.train = raw.train.merge(historical_person_df, on="object_id", how="left")
-    raw.test = raw.test.merge(historical_person_df, on="object_id", how="left")
-    for col in historical_person_df.columns:
-        raw.train[col] = raw.train[col].fillna(0)
-        raw.test[col] = raw.test[col].fillna(0)
-    return raw
-
-
-def fe_description_count(raw: RawData) -> RawData:
-    desc_counts = pd.concat([raw.train, raw.test], axis=0)["description"].value_counts()
-    raw.train["description_count"] = raw.train["description"].map(desc_counts)
-    raw.test["description_count"] = raw.test["description"].map(desc_counts)
-    return raw
-
-
-def fe_occupation(raw: RawData) -> RawData:
-    _occ_df = pd.crosstab(
-        raw.principal_maker_occupation["id"], raw.principal_maker_occupation["name"]
-    )
-    _occ_df.columns = [f"occ_is_{col}" for col in _occ_df.columns]
-    _df = raw.principal_maker.merge(_occ_df, on="id", how="left")
-
-    _df = _df.groupby("object_id").first()
-    raw.train = raw.train.merge(_df, on="object_id", how="left")
-    raw.test = raw.test.merge(_df, on="object_id", how="left")
-    return raw
-
-
-def fe_qualification(raw: RawData) -> RawData:
-    _df = pd.crosstab(
-        raw.principal_maker["object_id"], raw.principal_maker["qualification"]
-    )
-    _df.columns = [f"qualification_is_{col}" for col in _df.columns]
-    raw.train = raw.train.merge(_df, on="object_id", how="left")
-    raw.test = raw.test.merge(_df, on="object_id", how="left")
-    return raw
-
-
-raw = fe_historical_person(raw)
-raw = fe_description_count(raw)
-raw = fe_occupation(raw)
-raw = fe_qualification(raw)
-
-# %%
-
-_df = raw.principal_maker.groupby("object_id").first()
-raw.train = raw.train.merge(_df, on="object_id", how="left")
-
-# %%
-fig, ax = plt.subplots(figsize=(20, 6))
-RainCloud(
-    y=raw.train["likes_log"], x=raw.train["qualification"], ax=ax,
-)
-ax.grid()
-
-# %%
-raw.train.groupby("qualification")["likes_log"].agg(
-    ["count", "mean", "std"]
-).sort_values("mean")
-

@@ -268,7 +268,7 @@ def cat_encoding(raw: RawData, col: str) -> RawData:
         return raw
     _df = pd.concat([raw.train, raw.test], axis=0).reset_index(drop=True)
     _agg_df = _df.groupby(col)["likes_log"].agg(Config.cat_aggs)
-    _agg_df.columns = [f"{col}_{agg}" for agg in Config.cat_aags]
+    _agg_df.columns = [f"{col}_{agg}" for agg in Config.cat_aggs]
     raw.train = raw.train.merge(_agg_df, on=col, how="left")
     raw.test = raw.test.merge(_agg_df, on=col, how="left")
 
@@ -315,6 +315,95 @@ def _fe_sub_title(df: pd.DataFrame) -> pd.DataFrame:
         lambda row: len(row.more_title) < len(row.title), axis=1
     ).astype(np.int8)
     return df
+
+
+def fe_historical_person(raw: RawData) -> RawData:
+    _counts = raw.historical_person["name"].value_counts()
+    use_names = list(_counts[_counts > 30].index)
+    _df = raw.historical_person[raw.historical_person["name"].isin(use_names)].copy()
+    historical_person_df = pd.crosstab(_df["object_id"], _df["name"])
+    historical_person_df.columns = [
+        "historical_person_is_{}".format(re.sub("[^A-Za-z0-9_]+", "", col))
+        for col in historical_person_df.columns
+    ]
+    for col in historical_person_df.columns:
+        if "historical_person_is_" in col:
+            if col in raw.train.columns:
+                raw.train.drop(col, axis=1, inplace=True)
+            if col in raw.test.columns:
+                raw.test.drop(col, axis=1, inplace=True)
+    raw.train = raw.train.merge(historical_person_df, on="object_id", how="left")
+    raw.test = raw.test.merge(historical_person_df, on="object_id", how="left")
+    for col in historical_person_df.columns:
+        raw.train[col] = raw.train[col].fillna(0)
+        raw.test[col] = raw.test[col].fillna(0)
+    raw.train["historical_person_num"] = raw.train.filter(
+        like="historical_person_is_"
+    ).sum(axis=1)
+    raw.test["historical_person_num"] = raw.test.filter(
+        like="historical_person_is_"
+    ).sum(axis=1)
+    return raw
+
+
+def fe_description_count(raw: RawData) -> RawData:
+    desc_counts = pd.concat([raw.train, raw.test], axis=0)["description"].value_counts()
+    raw.train["description_count"] = raw.train["description"].map(desc_counts)
+    raw.test["description_count"] = raw.test["description"].map(desc_counts)
+    raw.train["description_count"] = raw.train["description_count"].fillna(0)
+    raw.test["description_count"] = raw.test["description_count"].fillna(0)
+    return raw
+
+
+def fe_occupation(raw: RawData) -> RawData:
+    _occ_df = pd.crosstab(
+        raw.principal_maker_occupation["id"], raw.principal_maker_occupation["name"]
+    )
+    _occ_df.columns = [f"occ_is_{col}" for col in _occ_df.columns]
+    _df = raw.principal_maker.merge(_occ_df, on="id", how="left")
+
+    _df = _df.groupby("object_id").first()
+    for col in _df.columns:
+        if "occ_is_" in col:
+            if col in raw.train.columns:
+                raw.train.drop(col, axis=1, inplace=True)
+            if col in raw.test.columns:
+                raw.test.drop(col, axis=1, inplace=True)
+    raw.train = raw.train.merge(_df, on="object_id", how="left")
+    raw.test = raw.test.merge(_df, on="object_id", how="left")
+    for col in _df.columns:
+        if "occ_is_" in col:
+            raw.train[col] = raw.train[col].fillna(0)
+            raw.test[col] = raw.test[col].fillna(0)
+    raw.train["occ_count"] = raw.train.filter(like="occ_is_").sum(axis=1)
+    raw.test["occ_count"] = raw.test.filter(like="occ_is_").sum(axis=1)
+    return raw
+
+
+def fe_qualification(raw: RawData) -> RawData:
+    _df = pd.crosstab(
+        raw.principal_maker["object_id"], raw.principal_maker["qualification"]
+    )
+    _df.columns = [f"qualification_is_{col}" for col in _df.columns]
+    for col in _df.columns:
+        if "qualification_is_" in col:
+            if col in raw.train.columns:
+                raw.train.drop(col, axis=1, inplace=True)
+            if col in raw.test.columns:
+                raw.test.drop(col, axis=1, inplace=True)
+    raw.train = raw.train.merge(_df, on="object_id", how="left")
+    raw.test = raw.test.merge(_df, on="object_id", how="left")
+    for col in _df.columns:
+        if "qualification_is_" in col:
+            raw.train[col] = raw.train[col].fillna(0)
+            raw.test[col] = raw.test[col].fillna(0)
+    raw.train["qualification_count"] = raw.train.filter(like="qualification_is_").sum(
+        axis=1
+    )
+    raw.test["qualification_count"] = raw.test.filter(like="qualification_is_").sum(
+        axis=1
+    )
+    return raw
 
 
 def fe_sub_title(raw: RawData) -> RawData:
@@ -451,7 +540,7 @@ def fe_cat_encoded_pca(
     return raw
 
 
-def fe_historical_person(raw: RawData) -> RawData:
+def fe_historical_person_cat(raw: RawData) -> RawData:
     _counts = raw.historical_person["name"].value_counts()
     _dict = defaultdict(str)
     for row in tqdm(
@@ -833,6 +922,11 @@ def fe(raw: RawData,) -> RawData:
     raw = fe_dating(raw)
     raw = fe_historical_person(raw)
     raw = fe_material(raw)
+    raw = fe_historical_person(raw)
+    raw = fe_historical_person_cat(raw)
+    raw = fe_description_count(raw)
+    raw = fe_occupation(raw)
+    raw = fe_qualification(raw)
     raw = fe_colorspace_pca(raw)
     raw, Config.technique_col_num = fe_technique(raw)
     raw = fe_color_pca(raw, Config.color_n_components, "PCA")
@@ -972,7 +1066,7 @@ raw = fe(raw)
 
 # %%
 
-models = "lgbm+cat"
+models = "lgbm"
 features = (
     [
         "size_h",
@@ -998,12 +1092,12 @@ features = (
         # "technique",
         # "object_collection",
         # "production_place",
-        # "color_r",
-        # "color_g",
-        # "color_b",
-        # "color_h",
-        # "color_s",
-        # "color_v",
+        "color_r",
+        "color_g",
+        "color_b",
+        "color_h",
+        "color_s",
+        "color_v",
         "title_lang",
         "title_len",
         "title_word_num",
@@ -1019,6 +1113,10 @@ features = (
         # "principal_or_first_maker_target_mean"
         "object_collection_num",
         "more_title_is_less_than_title",
+        "description_count",
+        # "historical_person_num",
+        # "occ_count",
+        # "qualification_count",
     ]
     + [f"color_{rgb}_{agg}" for rgb in list("rgb") for agg in ["count", "mean", "std"]]
     + [f"color_{hsv}_{agg}" for hsv in list("hsv") for agg in ["mean", "std"]]
@@ -1041,6 +1139,9 @@ features = (
     + [f"material_pca_{i}" for i in range(Config.material_n_components)]
     + [f"technique_pca_{i}" for i in range(Config.technique_n_components)]
     + [f"object_collection_{col}" for col in Config.object_collections]
+    # + raw.train.filter(like="historical_person_is_").columns.tolist()
+    # + raw.train.filter(like="occ_is_").columns.tolist()
+    # + raw.train.filter(like="qualification_is_").columns.tolist()
 )
 
 cat_features = [
@@ -1253,57 +1354,15 @@ raw.sample_submission["likes"] = test_pred
 raw.sample_submission.to_csv(Path.cwd() / "output" / "exp014-1_1.csv", index=False)
 
 # %%
-def fe_historical_person(raw: RawData) -> RawData:
-    _counts = raw.historical_person["name"].value_counts()
-    use_names = list(_counts[_counts > 30].index)
-    _df = raw.historical_person[raw.historical_person["name"].isin(use_names)].copy()
-    historical_person_df = pd.crosstab(_df["object_id"], _df["name"])
-    for col in historical_person_df.columns:
-        if col in raw.train.columns:
-            raw.train.drop(col, axis=0, inplace=True)
-            raw.test.drop(col, axis=0, inplace=True)
-    raw.train = raw.train.merge(historical_person_df, on="object_id", how="left")
-    raw.test = raw.test.merge(historical_person_df, on="object_id", how="left")
-    for col in historical_person_df.columns:
-        raw.train[col] = raw.train[col].fillna(0)
-        raw.test[col] = raw.test[col].fillna(0)
-    return raw
-
-
-def fe_description_count(raw: RawData) -> RawData:
-    desc_counts = pd.concat([raw.train, raw.test], axis=0)["description"].value_counts()
-    raw.train["description_count"] = raw.train["description"].map(desc_counts)
-    raw.test["description_count"] = raw.test["description"].map(desc_counts)
-    return raw
-
-
-def fe_occupation(raw: RawData) -> RawData:
-    _occ_df = pd.crosstab(
-        raw.principal_maker_occupation["id"], raw.principal_maker_occupation["name"]
-    )
-    _occ_df.columns = [f"occ_is_{col}" for col in _occ_df.columns]
-    _df = raw.principal_maker.merge(_occ_df, on="id", how="left")
-
-    _df = _df.groupby("object_id").first()
-    raw.train = raw.train.merge(_df, on="object_id", how="left")
-    raw.test = raw.test.merge(_df, on="object_id", how="left")
-    return raw
-
-
-def fe_qualification(raw: RawData) -> RawData:
-    _df = pd.crosstab(
-        raw.principal_maker["object_id"], raw.principal_maker["qualification"]
-    )
-    _df.columns = [f"qualification_is_{col}" for col in _df.columns]
-    raw.train = raw.train.merge(_df, on="object_id", how="left")
-    raw.test = raw.test.merge(_df, on="object_id", how="left")
-    return raw
 
 
 raw = fe_historical_person(raw)
 raw = fe_description_count(raw)
 raw = fe_occupation(raw)
 raw = fe_qualification(raw)
+
+# %%
+
 
 # %%
 
@@ -1322,3 +1381,16 @@ raw.train.groupby("qualification")["likes_log"].agg(
     ["count", "mean", "std"]
 ).sort_values("mean")
 
+
+# %%
+raw.train.filter(like="historical_person_is_")
+
+# %%
+(features)
+
+f = """
+size_h ,size_w ,size_t ,size_d ,size_area ,size_hw_ratio ,max_percentage ,principal_maker ,principal_or_first_maker ,copyright_holder ,acquisition_method ,acquisition_credit_line ,dating_period ,dating_year_early ,dating_year_late ,historical_person ,country_group ,country_num ,title_lang ,title_len ,title_word_num ,title_capital_word_num ,sub_title_len ,title_contains_the ,color_count ,material_num ,object_collection_num ,more_title_is_less_than_title ,color_r_count ,color_r_mean ,color_r_std ,color_g_count ,color_g_mean ,color_g_std ,color_b_count ,color_b_mean ,color_b_std ,color_h_mean ,color_h_std ,color_s_mean ,color_s_std ,color_v_mean ,color_v_std ,title_pca_0 ,title_pca_1 ,title_pca_2 ,title_pca_3 ,title_pca_4 ,title_pca_5 ,title_pca_6 ,title_pca_7 ,title_pca_8 ,title_pca_9 ,long_title_pca_0 ,long_title_pca_1 ,long_title_pca_2 ,long_title_pca_3 ,long_title_pca_4 ,long_title_pca_5 ,long_title_pca_6 ,long_title_pca_7 ,long_title_pca_8 ,long_title_pca_9 ,long_title_pca_10 ,long_title_pca_11 ,long_title_pca_12 ,long_title_pca_13 ,long_title_pca_14 ,description_en_pca_0 ,description_en_pca_1 ,description_en_pca_2 ,description_en_pca_3 ,description_en_pca_4 ,description_en_pca_5 ,description_en_pca_6 ,description_en_pca_7 ,description_en_pca_8 ,description_en_pca_9 ,description_en_pca_10 ,description_en_pca_11 ,description_en_pca_12 ,description_en_pca_13 ,description_en_pca_14 ,principal_maker_pca_0 ,principal_maker_pca_1 ,principal_maker_pca_2 ,principal_maker_pca_3 ,principal_maker_pca_4 ,principal_maker_pca_5 ,principal_maker_pca_6 ,principal_maker_pca_7 ,principal_maker_pca_8 ,principal_maker_pca_9 ,material_pca_0 ,material_pca_1 ,material_pca_2 ,material_pca_3 ,material_pca_4 ,material_pca_5 ,material_pca_6 ,material_pca_7 ,material_pca_8 ,material_pca_9 ,technique_pca_0 ,technique_pca_1 ,technique_pca_2 ,technique_pca_3 ,technique_pca_4 ,object_collection_prints ,object_collection_paintings ,object_collection_other ,principal_maker_count ,principal_or_first_maker_count ,copyright_holder_count ,acquisition_method_count ,acquisition_credit_line_count ,historical_person_count ,country_group_count ,title_lang_count
+""".split(" ,")
+
+# %%
+set(features) - set(f)
