@@ -102,6 +102,7 @@ class Config:
     n_splits = 5
     img_width = 512
     img_height = 512
+    color_code_num = 12
     exp_name = "atma-cv"
     batch_size = 32
     num_workers = 4
@@ -119,6 +120,9 @@ class Config:
     technique_n_components = 5
     colorspace_n_components = 30
     title_maker_n_components = 15
+    title_tfidf_n_components = 10
+    long_title_tfidf_n_components = 10
+    desc_en_tfidf_n_components = 10
     technique_col_num = 32
     object_collections = ["prints", "paintings", "other"]
     cat_aggs = ["count"]
@@ -128,11 +132,14 @@ class Config:
     bert_model = "_bert_base_multilingual_case_mean"
     # bert_model = ""
     lgb_params = {
-        "num_leaves": 100,
-        "min_data_in_leaf": 20,
+        # "num_leaves": 100,
+        "num_leaves": 150,
+        # "min_data_in_leaf": 20,
+        "min_data_in_leaf": 15,
         "objective": "regression",
         "max_depth": -1,
-        "learning_rate": 0.02,
+        # "learning_rate": 0.02,
+        "learning_rate": 0.018,
         "bagging_freq": 1,
         "bagging_fraction": 0.8,
         "bagging_seed": seed,
@@ -355,6 +362,105 @@ def fe_colorspace_pca(raw: RawData) -> RawData:
     return raw
 
 
+def fe_color_code(raw: RawData) -> RawData:
+    _df = raw.palette.copy()
+    append_rows = []
+    for row in tqdm(_df.itertuples(), total=len(_df)):
+        hsv = colorsys.rgb_to_hsv(row.color_r, row.color_g, row.color_b)
+        append_rows.append(hsv)
+    _df.loc[:, ["color_h", "color_s", "color_v"]] = append_rows
+    _df["color_code"] = (
+        pd.cut(_df["color_h"], Config.color_code_num).astype("category").cat.codes
+    )
+    color_code_ohe = defaultdict(lambda: [0] * Config.color_code_num)
+    color_code_ratio_ohe = defaultdict(lambda: [0] * Config.color_code_num)
+    for row in tqdm(_df.itertuples(), total=len(_df)):
+        color_code_ohe[row.object_id][row.color_code] += 1
+        color_code_ratio_ohe[row.object_id][row.color_code] += row.ratio
+    raw.train.loc[:, [f"color_code_{i}" for i in range(Config.color_code_num)]] = (
+        raw.train["object_id"].map(color_code_ohe).tolist()
+    )
+    raw.test.loc[:, [f"color_code_{i}" for i in range(Config.color_code_num)]] = (
+        raw.test["object_id"].map(color_code_ohe).tolist()
+    )
+    raw.train.loc[
+        :, [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
+    ] = (raw.train["object_id"].map(color_code_ratio_ohe).tolist())
+    raw.test.loc[:, [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]] = (
+        raw.test["object_id"].map(color_code_ratio_ohe).tolist()
+    )
+    raw.train["color_code_num"] = (
+        raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]] > 0
+    ).sum(axis=1)
+    raw.test["color_code_num"] = (
+        raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]] > 0
+    ).sum(axis=1)
+    raw.train["max_color_code"] = np.argmax(
+        raw.train[
+            [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
+        ].values,
+        axis=1,
+    )
+    raw.test["max_color_code"] = np.argmax(
+        raw.test[
+            [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
+        ].values,
+        axis=1,
+    )
+    raw.train["min_color_code"] = np.argmin(
+        raw.train[
+            [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
+        ].values,
+        axis=1,
+    )
+    raw.test["min_color_code"] = np.argmin(
+        raw.test[
+            [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
+        ].values,
+        axis=1,
+    )
+
+    max_distances = []
+    for row in tqdm(
+        raw.train[
+            [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
+        ].values
+        > 0
+    ):
+        max_distance = 0
+        nonzero_idxs = np.where(row > 0)[0]
+        if len(nonzero_idxs) > 1:
+            for i in range(len(nonzero_idxs)):
+                for j in range(i + 1, len(nonzero_idxs)):
+                    d = nonzero_idxs[j] - nonzero_idxs[i]
+                    if d > 6:
+                        d = 12 - d
+                    if max_distance < d:
+                        max_distance = d
+        max_distances.append(max_distance)
+    raw.train["max_color_code_distance"] = max_distances
+
+    max_distances = []
+    for row in tqdm(
+        raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values
+        > 0
+    ):
+        max_distance = 0
+        nonzero_idxs = np.where(row > 0)[0]
+        if len(nonzero_idxs) > 1:
+            for i in range(len(nonzero_idxs)):
+                for j in range(i + 1, len(nonzero_idxs)):
+                    d = nonzero_idxs[j] - nonzero_idxs[i]
+                    if d > 6:
+                        d = 12 - d
+                    if max_distance < d:
+                        max_distance = d
+        max_distances.append(max_distance)
+    raw.test["max_color_code_distance"] = max_distances
+
+    return raw
+
+
 def fe_color(raw: RawData) -> RawData:
     max_percentage = defaultdict(int)
     max_hex = defaultdict(str)
@@ -469,6 +575,68 @@ def fe_historical_person(raw: RawData) -> RawData:
     return raw
 
 
+def fe_maker(raw: RawData) -> RawData:
+    _df = raw.maker.set_index("name")
+    for col in ["place_of_birth", "date_of_birth", "date_of_death", "place_of_death"]:
+        raw.train[col] = raw.train["principal_maker"].map(_df[col])
+        raw.test[col] = raw.train["principal_maker"].map(_df[col])
+    raw.train["year_of_birth"] = (
+        raw.train["date_of_birth"].str.extract(r"(\d{4})").astype("float")
+    )
+    raw.train["year_of_death"] = (
+        raw.train["date_of_death"].str.extract(r"(\d{4})").astype("float")
+    )
+    raw.test["year_of_birth"] = (
+        raw.test["date_of_birth"].str.extract(r"(\d{4})").astype("float")
+    )
+    raw.test["year_of_death"] = (
+        raw.test["date_of_death"].str.extract(r"(\d{4})").astype("float")
+    )
+    raw.train["age_of_death"] = raw.train["year_of_death"] - raw.train["year_of_birth"]
+    raw.test["age_of_death"] = raw.test["year_of_death"] - raw.test["year_of_birth"]
+    raw.train["dating_ratio_late"] = raw.train.apply(
+        lambda row: (row.dating_year_late - row.year_of_birth) / row.age_of_death,
+        axis=1,
+    )
+    raw.test["dating_ratio_late"] = raw.test.apply(
+        lambda row: (row.dating_year_late - row.year_of_birth) / row.age_of_death,
+        axis=1,
+    )
+    raw.train["dating_ratio_early"] = raw.train.apply(
+        lambda row: (row.dating_year_early - row.year_of_birth) / row.age_of_death,
+        axis=1,
+    )
+    raw.test["dating_ratio_early"] = raw.test.apply(
+        lambda row: (row.dating_year_early - row.year_of_birth) / row.age_of_death,
+        axis=1,
+    )
+    raw.train.loc[raw.train["dating_ratio_late"] > 1, "dating_ratio_late"] = 1
+    raw.test.loc[raw.test["dating_ratio_late"] > 1, "dating_ratio_late"] = 1
+    raw.train.loc[raw.train["dating_ratio_early"] > 1, "dating_ratio_early"] = 1
+    raw.test.loc[raw.test["dating_ratio_early"] > 1, "dating_ratio_early"] = 1
+    raw.train["dating_age_late"] = (
+        raw.train["dating_year_late"] - raw.train["year_of_birth"]
+    )
+    raw.test["dating_age_late"] = (
+        raw.test["dating_year_late"] - raw.test["year_of_birth"]
+    )
+    raw.train["dating_age_early"] = (
+        raw.train["dating_year_early"] - raw.train["year_of_birth"]
+    )
+    raw.test["dating_age_early"] = (
+        raw.test["dating_year_early"] - raw.test["year_of_birth"]
+    )
+    raw.train.loc[raw.train["dating_age_late"] < 0, "dating_age_late"] = 0
+    raw.test.loc[raw.test["dating_age_late"] < 0, "dating_age_late"] = 0
+    raw.train.loc[raw.train["dating_age_early"] < 0, "dating_age_early"] = 0
+    raw.test.loc[raw.test["dating_age_early"] < 0, "dating_age_early"] = 0
+    raw.train.loc[raw.train["dating_age_late"] > 100, "dating_age_late"] = 100
+    raw.test.loc[raw.test["dating_age_late"] > 100, "dating_age_late"] = 100
+    raw.train.loc[raw.train["dating_age_early"] > 100, "dating_age_early"] = 100
+    raw.test.loc[raw.test["dating_age_early"] > 100, "dating_age_early"] = 100
+    return raw
+
+
 def fe_object_collection(raw: RawData) -> RawData:
     _dict = defaultdict(list)
     _df = raw.object_collection.copy()
@@ -557,6 +725,18 @@ def fe_material(raw: RawData) -> RawData:
 
 
 def fe_palette(raw: RawData) -> RawData:
+    _df = raw.palette.groupby("object_id")["ratio"].agg(["mean", "std"]).reset_index()
+    _df.columns = ["object_id", "ratio_mean", "ratio_std"]
+    for col in _df.columns:
+        if col == "object_id":
+            continue
+        if col in raw.train.columns:
+            raw.train = raw.train.drop(col, axis=1)
+        if col in raw.test.columns:
+            raw.test = raw.test.drop(col, axis=1)
+    raw.train = raw.train.merge(_df, on="object_id", how="left")
+    raw.test = raw.test.merge(_df, on="object_id", how="left")
+
     h = []
     s = []
     v = []
@@ -740,6 +920,34 @@ def fe_encoded_pca(
     return raw
 
 
+def fe_tfidf_pca(
+    raw: RawData, n_components: int, col: str, pca_method: str, min_df: int
+) -> RawData:
+    stop_words = get_stop_words("dutch") + get_stop_words("en")
+    tfidf = TfidfVectorizer(stop_words=stop_words, min_df=min_df)
+    tfidf_vec = tfidf.fit(
+        raw.train[col].fillna("").tolist() + raw.test[col].fillna("").tolist()
+    )
+    train_encoded = tfidf_vec.transform(raw.train[col].fillna("")).todense()
+    test_encoded = tfidf_vec.transform(raw.test[col].fillna("")).todense()
+
+    concated = np.concatenate((train_encoded, test_encoded))
+    with TimeUtil.timer(f"{pca_method} {col}"):
+        if pca_method == "PCA":
+            pca = PCA(n_components=n_components).fit(concated)
+        elif pca_method == "TSVD":
+            pca = TruncatedSVD(n_components=n_components).fit(concated)
+        elif pca_method == "UMAP":
+            pca = umap.UMAP(n_components=n_components).fit(concated)
+        else:
+            pca = PCA(n_components=n_components).fit(concated)
+        train_pca = pca.transform(train_encoded)
+        test_pca = pca.transform(test_encoded)
+    raw.train.loc[:, [f"{col}_tfidf_pca_{i}" for i in range(n_components)]] = train_pca
+    raw.test.loc[:, [f"{col}_tfidf_pca_{i}" for i in range(n_components)]] = test_pca
+    return raw
+
+
 def fe_title_lang(raw: RawData) -> RawData:
     model = load_model(str(Config.root_dir / "data/lid.176.bin"))
     with TimeUtil.timer("title lang"):
@@ -836,6 +1044,9 @@ def fe(raw: RawData,) -> RawData:
     raw = fe_historical_person(raw)
     raw = fe_material(raw)
     raw = fe_colorspace_pca(raw)
+    raw = fe_palette(raw)
+    raw = fe_color_code(raw)
+    raw = fe_maker(raw)
     raw, Config.technique_col_num = fe_technique(raw)
     raw = fe_color_pca(raw, Config.color_n_components, "PCA")
     raw = fe_cat_encoded_pca(
@@ -844,6 +1055,11 @@ def fe(raw: RawData,) -> RawData:
     raw = fe_cat_encoded_pca(
         raw, raw.technique, "technique", Config.material_n_components
     )
+    raw = fe_tfidf_pca(raw, Config.title_tfidf_n_components, "title", "PCA", 1)
+    raw = fe_tfidf_pca(
+        raw, Config.long_title_tfidf_n_components, "long_title", "PCA", 1
+    )
+    raw = fe_tfidf_pca(raw, Config.desc_en_n_components, "description_en", "PCA", 5)
     raw = fe_encoded_pca(
         raw,
         Config.title_maker_n_components,
@@ -851,13 +1067,14 @@ def fe(raw: RawData,) -> RawData:
         True,
         "PCA",
     )
-    raw = fe_encoded_pca(raw, Config.title_n_components, "title", True, "PCA")
+    # raw = fe_encoded_pca(raw, Config.title_n_components, "title", True, "PCA")
+    raw = fe_encoded_pca(raw, Config.title_n_components, "title", False, "PCA")
     raw = fe_encoded_pca(
         raw, Config.long_title_n_components, "long_title", False, "PCA"
     )
     # raw = fe_encoded_pca(raw, Config.desc_n_components, "description", True, "PCA")
     raw = fe_encoded_pca(
-        raw, Config.desc_en_n_components, "description_en", True, "UMAP"
+        raw, Config.desc_en_n_components, "description_en", False, "UMAP"
     )
     raw = fe_encoded_pca(
         raw, Config.principal_maker_n_components, "principal_maker", False, "PCA"
@@ -873,7 +1090,6 @@ def fe(raw: RawData,) -> RawData:
     raw = fe_color(raw)
     raw = fe_object_collection(raw)
     raw = fe_production_place(raw)
-    raw = fe_palette(raw)
     return raw
 
 
@@ -902,6 +1118,8 @@ def fillna(raw: RawData) -> RawData:
         "color_h_std",
         "color_s_std",
         "color_v_std",
+        "ratio_mean",
+        "ratio_std",
     ] + [f"colorspace_pca_{i}" for i in range(Config.colorspace_n_components)]
     _df = pd.concat([raw.train, raw.test], axis=0).reset_index(drop=True)
     for col in fill_zero_cols:
@@ -983,7 +1201,7 @@ features = (
         "size_d",
         "size_area",
         "size_hw_ratio",
-        "max_percentage",
+        # "max_percentage",
         # "max_hex",
         "principal_maker",
         "principal_or_first_maker",
@@ -1021,6 +1239,20 @@ features = (
         # "principal_or_first_maker_target_mean"
         "object_collection_num",
         "more_title_is_less_than_title",
+        "ratio_mean",
+        "ratio_std",
+        "place_of_birth",
+        "year_of_birth",
+        "year_of_death",
+        "age_of_death",
+        "dating_ratio_late",
+        "dating_ratio_early",
+        "dating_age_late",
+        "dating_age_early",
+        "color_code_num",
+        "max_color_code",
+        "min_color_code",
+        "max_color_code_distance",
     ]
     + [f"color_{rgb}_{agg}" for rgb in list("rgb") for agg in ["count", "mean", "std"]]
     + [f"color_{hsv}_{agg}" for hsv in list("hsv") for agg in ["mean", "std"]]
@@ -1043,6 +1275,14 @@ features = (
     + [f"material_pca_{i}" for i in range(Config.material_n_components)]
     + [f"technique_pca_{i}" for i in range(Config.technique_n_components)]
     + [f"object_collection_{col}" for col in Config.object_collections]
+    # + [
+    #     f"long_title_tfidf_pca_{col}"
+    #     for col in range(Config.long_title_tfidf_n_components)
+    # ]
+    + [f"title_tfidf_pca_{col}" for col in range(Config.title_tfidf_n_components)]
+    # + [f"description_en_tfidf_pca_{col}" for col in range(Config.desc_en_n_components)]
+    + [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
+    + [f"color_code_{i}" for i in range(Config.color_code_num)]
 )
 
 cat_features = [
@@ -1064,6 +1304,9 @@ cat_features = [
         "title_lang",
         "country_group",
         "country",
+        "max_color_code",
+        "min_color_code",
+        "place_of_birth",
     ]
 ]
 
@@ -1097,14 +1340,18 @@ lgb_models = {}
 cat_models = {}
 xgb_models = {}
 studies = {}
+cut_off = False
 # train_folds = [3, 4]
 train_folds = [0, 1, 2, 3, 4]
 for fold, (train_idx, valid_idx) in enumerate(folds):
     if fold not in train_folds:
         continue
     print(f"------------------------ fold {fold} -----------------------")
-    _train_df = raw.train.loc[train_idx]
+    _train_df = raw.train.loc[train_idx].copy()
     _valid_df = raw.train.loc[valid_idx]
+
+    if cut_off:
+        _train_df.loc[_train_df["likes_log"] > 7, "likes_log"] = 7
 
     if models == "cato":
         study = optuna.create_study()
@@ -1169,7 +1416,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         xgb_models[fold] = xgb_model
 
     if models == "lgbm+cat":
-        y_pred = 0.6 * y_pred_cat + 0.3 * y_pred_lgb
+        y_pred = 0.6 * y_pred_cat + 0.4 * y_pred_lgb
     elif models == "lgbm+cat+xgb":
         y_pred = 0.4 * y_pred_cat + 0.4 * y_pred_lgb + 0.2 * y_pred_xgb
     elif models == "lgbm":
@@ -1190,7 +1437,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         print()
 
     if models == "lgbm+cat":
-        y_pred = np.expm1(0.6 * y_pred_log_cat + 0.3 * y_pred_log_lgb)
+        y_pred = np.expm1(0.6 * y_pred_log_cat + 0.4 * y_pred_log_lgb)
         y_pred[y_pred < 0] = 0
         rmsle = np.sqrt(mean_squared_log_error(y_true, y_pred))
         print(f"------------------- log mean rmsle {rmsle} -----------------------")
@@ -1247,10 +1494,10 @@ lgb_model = lgb.train(
 )
 test_pred_cat = np.expm1(cat_model.predict(raw.test[features]))
 test_pred_lgb = np.expm1(lgb_model.predict(raw.test[features]))
-test_pred = 0.6 * test_pred_cat + 0.3 * test_pred_lgb
+test_pred = 0.6 * test_pred_cat + 0.4 * test_pred_lgb
 test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
-raw.sample_submission.to_csv(Path.cwd() / "output" / "exp018_1.csv", index=False)
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp018_2.csv", index=False)
 
 # %%
 raw.test = raw.test.merge(
@@ -1277,7 +1524,7 @@ for fold in range(Config.n_splits):
 test_pred = test_pred_all.mean(axis=0)
 test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
-raw.sample_submission.to_csv(Path.cwd() / "output" / "exp014-1_1.csv", index=False)
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp019_1.csv", index=False)
 
 # %%
 raw = fe_palette(raw)
@@ -1317,7 +1564,7 @@ for i, (index, df) in enumerate(_df.groupby("object_id")):
 
 
 # %%
-col = "color_r_count"
-raw.train[f"{col}_cut"] = pd.cut(raw.train[col], 20)
-raw.train.groupby(f"{col}_cut")["likes_log"].agg(["count", "mean"])
+features = ()
+cat_features = ["max_color_code", "min_color_code"]
 
+# %%
