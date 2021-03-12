@@ -1480,7 +1480,7 @@ cat_train_dataset = Pool(
     raw.train[features], raw.train["likes_log"], cat_features=cat_features
 )
 lgb_train_dataset = lgb.Dataset(raw.train[features], raw.train["likes_log"])
-cat_model = CatBoostRegressor(**Config.cat_params, iterations=3000)
+cat_model = CatBoostRegressor(**Config.cat_params, iterations=3200)
 cat_model.fit(
     cat_train_dataset, verbose_eval=100, eval_set=[cat_train_dataset],
 )
