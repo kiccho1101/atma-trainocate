@@ -120,8 +120,8 @@ class Config:
     desc_n_components = 15
     long_title_desc_en_n_components = 15
     color_n_components = 3
-    material_n_components = 15
-    technique_n_components = 10
+    material_n_components = 10
+    technique_n_components = 5
     colorspace_n_components = 30
     title_maker_n_components = 15
     title_tfidf_n_components = 10
@@ -1250,7 +1250,7 @@ raw = fe(raw)
 
 # %%
 
-models = "lgbm+cat"
+models = "lgbm"
 features = (
     [
         "size_h",
@@ -1315,10 +1315,10 @@ features = (
         "color_distance_mean",
         "color_distance_std",
         "second_color_code",
-        "third_color_code",
-        "color_code_max_ratio",
-        "color_code_second_ratio",
-        "color_code_third_ratio",
+        # "third_color_code",
+        # "color_code_max_ratio",
+        # "color_code_second_ratio",
+        # "color_code_third_ratio",
     ]
     + [f"color_{rgb}_{agg}" for rgb in list("rgb") for agg in ["count", "mean", "std"]]
     + [f"color_{hsv}_{agg}" for hsv in list("hsv") for agg in ["mean", "std"]]
@@ -1647,6 +1647,131 @@ cat_features = [
     "third_color_code",
 ]
 
+
+# %%
+_df = raw.palette.copy()
+Config.color_code_num = 24
+
+with TimeUtil.timer("color_code clustering"):
+    kmeans = KMeans(n_clusters=Config.color_code_num)
+    scaled = MinMaxScaler().fit_transform(
+        raw.palette[["color_r", "color_g", "color_b"]].values
+    )
+    kmeans.fit(scaled)
+    color_code = kmeans.predict(scaled)
+    _df["color_code"] = color_code
+
+color_code_ohe = defaultdict(lambda: [0] * Config.color_code_num)
+color_code_ratio_ohe = defaultdict(lambda: [0] * Config.color_code_num)
+for row in tqdm(_df.itertuples(), total=len(_df)):
+    color_code_ohe[row.object_id][row.color_code] += 1
+    color_code_ratio_ohe[row.object_id][row.color_code] += row.ratio
+raw.train.loc[:, [f"color_code_{i}" for i in range(Config.color_code_num)]] = (
+    raw.train["object_id"].map(color_code_ohe).tolist()
+)
+raw.test.loc[:, [f"color_code_{i}" for i in range(Config.color_code_num)]] = (
+    raw.test["object_id"].map(color_code_ohe).tolist()
+)
+raw.train.loc[:, [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]] = (
+    raw.train["object_id"].map(color_code_ratio_ohe).tolist()
+)
+raw.test.loc[:, [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]] = (
+    raw.test["object_id"].map(color_code_ratio_ohe).tolist()
+)
+raw.train["color_code_num"] = (
+    raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]] > 0
+).sum(axis=1)
+raw.test["color_code_num"] = (
+    raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]] > 0
+).sum(axis=1)
+raw.train["max_color_code"] = np.argmax(
+    raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)
+raw.test["max_color_code"] = np.argmax(
+    raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)
+raw.train["min_color_code"] = np.argmin(
+    raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)
+raw.test["min_color_code"] = np.argmin(
+    raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)
+raw.train["second_color_code"] = np.argsort(
+    raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -2]
+raw.train["third_color_code"] = np.argsort(
+    raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -3]
+raw.test["second_color_code"] = np.argsort(
+    raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -2]
+raw.test["third_color_code"] = np.argsort(
+    raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -3]
+raw.train["color_code_max_ratio"] = np.sort(
+    raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -1]
+raw.train["color_code_second_ratio"] = np.sort(
+    raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -2]
+raw.train["color_code_third_ratio"] = np.sort(
+    raw.train[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -3]
+
+raw.test["color_code_max_ratio"] = np.sort(
+    raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -1]
+raw.test["color_code_second_ratio"] = np.sort(
+    raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -2]
+raw.test["color_code_third_ratio"] = np.sort(
+    raw.test[[f"color_code_ratio_{i}" for i in range(Config.color_code_num)]].values,
+    axis=1,
+)[:, -3]
+
+d_features = defaultdict(lambda: [0] * 4)
+group = raw.palette.groupby("object_id")
+for object_id, _df in tqdm(group, total=len(group)):
+    rgbs = _df[["color_r", "color_g", "color_b"]].values
+    distance_min = 10e10
+    distance_max = 0
+    distances = []
+    for i in range(len(rgbs)):
+        for j in range(i + 1, len(rgbs)):
+            d = np.linalg.norm(rgbs[i] - rgbs[j])
+            if distance_min > d:
+                distance_min = d
+            if distance_max < d:
+                distance_max = d
+            distances.append(d)
+    distance_mean = np.mean(distances)
+    distance_std = np.std(distances)
+    d_features[object_id] = [
+        distance_min,
+        distance_max,
+        distance_mean,
+        distance_std,
+    ]
+raw.train.loc[
+    :, [f"color_distance_{agg}" for agg in ["min", "max", "mean", "std"]]
+] = np.stack(raw.train["object_id"].map(d_features).values)
+raw.test.loc[
+    :, [f"color_distance_{agg}" for agg in ["min", "max", "mean", "std"]]
+] = np.stack(raw.test["object_id"].map(d_features).values)
+
 # %%
 raw.train.sort_values("likes", ascending=False)[
     [
@@ -1660,4 +1785,3 @@ raw.train.sort_values("likes", ascending=False)[
         "color_code_third_ratio",
     ]
 ][:30]
-

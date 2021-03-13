@@ -120,8 +120,8 @@ class Config:
     desc_n_components = 15
     long_title_desc_en_n_components = 15
     color_n_components = 3
-    material_n_components = 15
-    technique_n_components = 10
+    material_n_components = 10
+    technique_n_components = 5
     colorspace_n_components = 30
     title_maker_n_components = 15
     title_tfidf_n_components = 10
@@ -370,7 +370,7 @@ def fe_color_code(raw: RawData) -> RawData:
     _df = raw.palette.copy()
 
     with TimeUtil.timer("color_code clustering"):
-        kmeans = KMeans(n_clusters=Config.color_code_num)
+        kmeans = KMeans(n_clusters=Config.color_code_num, random_state=Config.seed)
         scaled = MinMaxScaler().fit_transform(
             raw.palette[["color_r", "color_g", "color_b"]].values
         )
@@ -1190,7 +1190,7 @@ raw = fe(raw)
 
 # %%
 
-models = "lgbm+cat"
+models = "lgbm"
 features = (
     [
         "size_h",
