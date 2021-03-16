@@ -1255,7 +1255,7 @@ raw = fe(raw)
 
 # %%
 
-models = "lgbm"
+models = "lgbm+cat"
 features = (
     [
         "size_h",
@@ -1302,24 +1302,24 @@ features = (
         # "principal_or_first_maker_target_mean"
         "object_collection_num",
         "more_title_is_less_than_title",
-        "ratio_mean",
-        "ratio_std",
-        "place_of_birth",
-        "year_of_birth",
-        "year_of_death",
-        "age_of_death",
-        "dating_ratio_late",
-        "dating_ratio_early",
-        "dating_age_late",
-        "dating_age_early",
-        "color_code_num",
-        "max_color_code",
-        "min_color_code",
-        "color_distance_min",
-        "color_distance_max",
-        "color_distance_mean",
-        "color_distance_std",
-        "second_color_code",
+        # "ratio_mean",
+        # "ratio_std",
+        # "place_of_birth",
+        # "year_of_birth",
+        # "year_of_death",
+        # "age_of_death",
+        # "dating_ratio_late",
+        # "dating_ratio_early",
+        # "dating_age_late",
+        # "dating_age_early",
+        # "color_code_num",
+        # "max_color_code",
+        # "min_color_code",
+        # "color_distance_min",
+        # "color_distance_max",
+        # "color_distance_mean",
+        # "color_distance_std",
+        # "second_color_code",
         # "third_color_code",
         # "color_code_max_ratio",
         # "color_code_second_ratio",
@@ -1352,7 +1352,7 @@ features = (
     # ]
     + [f"title_tfidf_pca_{col}" for col in range(Config.title_tfidf_n_components)]
     # + [f"description_en_tfidf_pca_{col}" for col in range(Config.desc_en_n_components)]
-    + [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
+    # + [f"color_code_ratio_{i}" for i in range(Config.color_code_num)]
     # + [f"color_code_{i}" for i in range(Config.color_code_num)]
 )
 
@@ -1412,6 +1412,7 @@ rmsles = []
 lgb_models = {}
 cat_models = {}
 xgb_models = {}
+stacking_models = {}
 studies = {}
 cut_off = False
 # train_folds = [3, 4]
@@ -1510,7 +1511,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         print()
 
     if models == "lgbm+cat":
-        y_pred = np.expm1(0.6 * y_pred_log_cat + 0.4 * y_pred_log_lgb)
+        y_pred = np.expm1(0.4 * y_pred_log_cat + 0.6 * y_pred_log_lgb)
         y_pred[y_pred < 0] = 0
         rmsle = np.sqrt(mean_squared_log_error(y_true, y_pred))
         print(f"------------------- log mean rmsle {rmsle} -----------------------")
@@ -1531,6 +1532,17 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         )
         print()
 
+    if models == "lgbm+cat":
+        stacking_model = lgb.LGBMRegressor()
+        y_true = _valid_df["likes"].values
+        x = np.stack([y_pred_log_cat, y_pred_log_lgb]).T
+        stacking_model.fit(x, _valid_df["likes_log"])
+        y_pred = np.expm1(stacking_model.predict(x))
+        y_pred[y_pred < 0] = 0
+        rmsle = np.sqrt(mean_squared_log_error(y_true, y_pred))
+        stacking_models[fold] = stacking_model
+        print(f"------------------- stacking rmsle {rmsle} -----------------------")
+        print()
 
 print("")
 print(f"------------------- average rmsle {np.mean(rmsles)} -----------------------")
@@ -1547,7 +1559,7 @@ if "lgbm" in models:
 
 # %%
 # pseudo_df = get_pseudo_df(raw)
-# raw.train = pd.concat([raw.train, pseudo_df], axis=0).reset_index(drop=True)
+raw.train = pd.concat([raw.train, raw.test], axis=0).reset_index(drop=True)
 # raw.train, raw.test = target_encoding(raw.train, raw.test)
 cat_train_dataset = Pool(
     raw.train[features], raw.train["likes_log"], cat_features=cat_features
@@ -1560,17 +1572,82 @@ cat_model.fit(
 lgb_model = lgb.train(
     Config.lgb_params,
     lgb_train_dataset,
-    num_boost_round=1300,
+    num_boost_round=1500,
     verbose_eval=50,
     valid_sets=[lgb_train_dataset],
     categorical_feature=cat_features,
 )
 test_pred_cat = np.expm1(cat_model.predict(raw.test[features]))
 test_pred_lgb = np.expm1(lgb_model.predict(raw.test[features]))
-test_pred = 0.6 * test_pred_cat + 0.4 * test_pred_lgb
+test_pred = 0.4 * test_pred_cat + 0.6 * test_pred_lgb
+
 test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
-raw.sample_submission.to_csv(Path.cwd() / "output" / "exp018_2.csv", index=False)
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp022_3.csv", index=False)
+
+
+# %%
+test_pred_logs = []
+for i in range(5):
+    test_pred_logs.append(
+        stacking_models[i].predict(
+            np.stack([np.log1p(test_pred_cat), np.log1p(test_pred_lgb)]).T
+        )
+    )
+
+# %%
+test_pred = np.expm1(np.mean(np.stack(test_pred_logs), axis=0))
+test_pred[test_pred < 0] = 0
+raw.sample_submission["likes"] = test_pred
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp022_4.csv", index=False)
+
+
+# %%
+sub_cat = pd.read_csv(Path.cwd() / "output" / "exp022_cat_1.csv")
+test_pred_cat = sub_cat["likes"].values
+# %%
+
+# %%
+test_pred_lgb_1 = pd.read_csv(Path.cwd() / "output" / "exp022_lgb_cv_77.csv")[
+    "likes"
+].values
+# test_pred_lgb_2 = pd.read_csv(Path.cwd() / "output" / "exp022_lgb_lb_90.csv")[
+#     "likes"
+# ].values
+test_pred_cat_1 = pd.read_csv(Path.cwd() / "output" / "exp022_cat_cv_77.csv")[
+    "likes"
+].values
+test_pred_cat_2 = pd.read_csv(Path.cwd() / "output" / "exp022_cat_cv_90.csv")[
+    "likes"
+].values
+test_pred = (
+    0.4 * test_pred_lgb_1
+    # + 0.2 * test_pred_lgb_2
+    + 0.3 * test_pred_cat_1
+    + 0.3 * test_pred_cat_2
+)
+test_pred[test_pred < 0] = 0
+raw.sample_submission["likes"] = test_pred
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp022_all_cv_1.csv", index=False)
+
+
+# %%
+submission = pd.read_csv(Path.cwd() / "output" / "exp018_2.csv")
+# %%
+submission["likes"] = 0.95 * submission["likes"]
+
+# %%
+submission.to_csv(Path.cwd() / "output" / "final.csv", index=False)
+
+
+# %%
+test_pred = 0.4 * test_pred_lgb + 0.6 * test_pred_cat
+test_pred[test_pred < 0] = 0
+raw.sample_submission["likes"] = test_pred
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp022_all_3.csv", index=False)
+
+# %%
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp022_all_cv_1.csv", index=False)
 
 # %%
 raw.test = raw.test.merge(
@@ -1776,17 +1853,3 @@ raw.train.loc[
 raw.test.loc[
     :, [f"color_distance_{agg}" for agg in ["min", "max", "mean", "std"]]
 ] = np.stack(raw.test["object_id"].map(d_features).values)
-
-# %%
-raw.train.sort_values("likes", ascending=False)[
-    [
-        "likes",
-        "title",
-        "max_color_code",
-        "color_code_max_ratio",
-        "second_color_code",
-        "color_code_second_ratio",
-        "third_color_code",
-        "color_code_third_ratio",
-    ]
-][:30]

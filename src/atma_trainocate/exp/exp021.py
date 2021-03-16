@@ -1250,7 +1250,7 @@ raw = fe(raw)
 
 # %%
 
-models = "lgbm"
+models = "lgbm+cat"
 features = (
     [
         "size_h",
@@ -1484,7 +1484,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         xgb_models[fold] = xgb_model
 
     if models == "lgbm+cat":
-        y_pred = 0.6 * y_pred_cat + 0.4 * y_pred_lgb
+        y_pred = 0.4 * y_pred_cat + 0.6 * y_pred_lgb
     elif models == "lgbm+cat+xgb":
         y_pred = 0.4 * y_pred_cat + 0.4 * y_pred_lgb + 0.2 * y_pred_xgb
     elif models == "lgbm":
@@ -1505,7 +1505,7 @@ for fold, (train_idx, valid_idx) in enumerate(folds):
         print()
 
     if models == "lgbm+cat":
-        y_pred = np.expm1(0.6 * y_pred_log_cat + 0.4 * y_pred_log_lgb)
+        y_pred = np.expm1(0.4 * y_pred_log_cat + 0.6 * y_pred_log_lgb)
         y_pred[y_pred < 0] = 0
         rmsle = np.sqrt(mean_squared_log_error(y_true, y_pred))
         print(f"------------------- log mean rmsle {rmsle} -----------------------")
@@ -1555,17 +1555,17 @@ cat_model.fit(
 lgb_model = lgb.train(
     Config.lgb_params,
     lgb_train_dataset,
-    num_boost_round=1300,
+    num_boost_round=2000,
     verbose_eval=50,
     valid_sets=[lgb_train_dataset],
     categorical_feature=cat_features,
 )
 test_pred_cat = np.expm1(cat_model.predict(raw.test[features]))
 test_pred_lgb = np.expm1(lgb_model.predict(raw.test[features]))
-test_pred = 0.6 * test_pred_cat + 0.4 * test_pred_lgb
+test_pred = 0.4 * test_pred_cat + 0.6 * test_pred_lgb
 test_pred[test_pred < 0] = 0
 raw.sample_submission["likes"] = test_pred
-raw.sample_submission.to_csv(Path.cwd() / "output" / "exp018_2.csv", index=False)
+raw.sample_submission.to_csv(Path.cwd() / "output" / "exp021_1.csv", index=False)
 
 # %%
 raw.test = raw.test.merge(
@@ -1785,3 +1785,5 @@ raw.train.sort_values("likes", ascending=False)[
         "color_code_third_ratio",
     ]
 ][:30]
+
+# %%
