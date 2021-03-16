@@ -33,6 +33,7 @@ stop-words = "*"
 optuna = "*"
 xgboost = "*"
 ptitprince = "*"
+beautifulsoup4 = "*"
 
 [requires]
 python_version = "3.8"
